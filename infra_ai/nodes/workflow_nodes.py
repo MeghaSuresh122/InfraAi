@@ -278,7 +278,10 @@ def human_repo_node(state: InfraGraphState) -> dict[str, Any]:
         "kind": "confirm_repo",
         "repo_url": repo,
         "target_branch": state.get("target_branch") or s.git_default_branch,
-        "message": "Confirm code generation and push. You may override repo_url / target_branch.",
+        "message": (
+            "Confirm code generation. Override repo_url: use an https/git URL to clone and push a new branch, "
+            "or a filesystem path (e.g. ./my-infra-out or C:/infra-out) to write files locally only (no GitHub push)."
+        ),
     }
     conf = interrupt(payload)
     if not isinstance(conf, dict):

@@ -20,6 +20,7 @@ dependencies = [
     "pyyaml>=6.0.2",
     "gitpython>=3.1.43",
     "httpx>=0.28.0",
+    "jsonpatch>=1.33",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +33,10 @@ dev = [
 
 [project.scripts]
 infra-ai = "infra_ai.cli:main"
+
+[tool.uv]
+# Copy mode avoids hardlink failures on cloud-synced folders (e.g. OneDrive on Windows).
+link-mode = "copy"
 
 [tool.hatch.build.targets.wheel]
 packages = ["infra_ai"]

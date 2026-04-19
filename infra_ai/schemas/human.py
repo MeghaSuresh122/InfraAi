@@ -15,7 +15,13 @@ class RepoConfirmResume(BaseModel):
     """Human confirms codegen and may override repo URL / branch."""
 
     confirm: bool = True
-    repo_url: str | None = None
+    repo_url: str | None = Field(
+        default=None,
+        description=(
+            "Remote Git URL (https/git@/…) to clone and push a new branch, or a local directory path "
+            "(or file:///…) to write generated files under that path only—no remote push."
+        ),
+    )
     target_branch: str | None = None
 
 

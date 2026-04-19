@@ -1,13 +1,43 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from git import Actor, Repo
 
 from infra_ai.config import get_settings
+
+
+def is_remote_git_url(url: str) -> bool:
+    """
+    True if repo_url should be cloned/pushed as a remote Git repository.
+    Filesystem paths (including Windows drive paths and ./relative dirs) return False.
+    """
+    u = (url or "").strip()
+    if not u:
+        return False
+    if u.lower().startswith("git@"):
+        return True
+    parsed = urlparse(u)
+    if parsed.scheme:
+        return parsed.scheme.lower() in ("http", "https", "git", "ssh")
+    return False
+
+
+def resolve_local_repo_root(url: str) -> Path:
+    """Resolve ``repo_url`` to an absolute directory when it is a local (non-remote) target."""
+    u = url.strip()
+    parsed = urlparse(u)
+    if parsed.scheme.lower() == "file":
+        raw = parsed.path or "/"
+        if os.name == "nt" and len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":
+            raw = raw[1:]
+        return Path(raw).expanduser().resolve()
+    return Path(u).expanduser().resolve()
 
 
 class GitService:
@@ -31,7 +61,12 @@ class GitService:
         branch_prefix: str,
     ) -> tuple[str, list[str]]:
         """
-        Returns (branch_name, messages). If no repo_url, writes to ./output only.
+        Returns (branch_name, messages).
+
+        - No ``repo_url``: writes under ``./output/<branch_name>/`` only (no push).
+        - Local path (not a remote Git URL): writes under ``<repo_url>/<branch_name>/`` only
+          (no clone, no GitHub push).
+        - Remote Git URL: writes under ``./output/...`` then clones, commits, and pushes a new branch.
         """
         messages: list[str] = []
         branch_name = f"{branch_prefix}-{uuid4().hex[:8]}"
@@ -44,7 +79,22 @@ class GitService:
         messages.append(f"Wrote files under {out_dir}")
 
         if not self.repo_url:
-            messages.append("GIT_REPO_URL not set; skipped git clone/push.")
+            messages.append("repo_url not set; skipped remote push and local project path.")
+            return branch_name, messages
+
+        if not is_remote_git_url(self.repo_url):
+            local_root = resolve_local_repo_root(self.repo_url)
+            local_root.mkdir(parents=True, exist_ok=True)
+            target = local_root / branch_name
+            target.mkdir(parents=True, exist_ok=True)
+            for rel, content in files:
+                dest = target / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content, encoding="utf-8")
+            messages.append(
+                f"Wrote files to local path {target} (no remote clone/push). "
+                f"Mirror also at {out_dir}."
+            )
             return branch_name, messages
 
         tmp = Path(tempfile.mkdtemp(prefix="infra-ai-git-"))
