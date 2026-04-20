@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import interrupt
 
 from infra_ai.config import get_settings
@@ -322,6 +322,48 @@ def _parse_generated_files(text: str) -> list[tuple[str, str]]:
     return files
 
 
+def _codegen_system_messages(artifact: str) -> list[Any]:
+    if artifact.startswith("terraform_"):
+        return [
+            SystemMessage(
+                content=(
+                    "You are a Terraform expert.\n\n"
+                    "Use terraform-aws-modules/eks/aws best practices.\n"
+                    "Follow this pattern:\n"
+                    "- VPC module\n"
+                    "- EKS module (no custom IAM)\n"
+                    "- Outputs only from module\n\n"
+                    "Follow these strict rules:\n"
+                    "1. If using terraform-aws-modules/eks/aws:\n"
+                    "   - DO NOT create IAM roles manually unless explicitly required\n"
+                    "   - DO NOT create security groups unless needed\n"
+                    "2. Separate infrastructure and Kubernetes resources:\n"
+                    "   - No kubernetes_* resources in same apply as EKS creation\n"
+                    "3. Ensure dependency correctness:\n"
+                    "   - Providers must not depend on resources created in same plan\n"
+                    "4. Prefer module defaults unless customization is required\n"
+                    "5. Output only valid, deployable Terraform\n\n"
+                    "After generating:\n"
+                    "- Simulate terraform plan mentally\n"
+                    "- Identify dependency or lifecycle issues\n"
+                    "- Fix them before output\n"
+                )
+            )
+        ]
+    return [
+        SystemMessage(
+            content=(
+                "You are a Kubernetes manifest expert.\n\n"
+                "Generate valid Kubernetes YAML only.\n"
+                "Do not include Terraform or EKS cluster creation resources.\n"
+                "Use apiVersion/apps/v1 for Deployment and apiVersion/v1 for Service.\n"
+                "Do not use :latest image tags.\n"
+                "Keep resources focused on the application workload and common defaults.\n"
+            )
+        )
+    ]
+
+
 def _terraform_fmt(paths: list[Path]) -> None:
     tf_files = [p for p in paths if p.suffix == ".tf"]
     if not tf_files:
@@ -365,7 +407,8 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
                 f"Artifact type: {artifact}\n"
                 f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
             )
-            msg = llm.invoke([HumanMessage(content=prompt)])
+            messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
+            msg = llm.invoke(messages)
             text = str(msg.content)
         except Exception:  # noqa: BLE001
             logger.exception("Codegen LLM failed; using stub output")
