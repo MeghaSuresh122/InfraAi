@@ -30,10 +30,23 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
 
 
 def invoke_structured(llm: BaseChatModel, prompt: str, model: type[T]) -> T:
-    structured = llm.with_structured_output(model)
-    out = structured.invoke([HumanMessage(content=prompt)])
-    if isinstance(out, model):
-        return out
-    if isinstance(out, dict):
-        return model.model_validate(out)
-    raise TypeError(f"Unexpected structured output type: {type(out)}")
+    try:
+        structured = llm.with_structured_output(model)
+        out = structured.invoke([HumanMessage(content=prompt)])
+        if isinstance(out, model):
+            return out
+        if isinstance(out, dict):
+            return model.model_validate(out)
+    except Exception:
+        pass  # Fallback to manual parsing
+    
+    # Fallback: prompt the model to just output JSON and parse it manually
+    fallback_prompt = prompt + "\n\nReturn ONLY a valid JSON object matching the requested schema. Do not include any other text."
+    msg = llm.invoke([HumanMessage(content=fallback_prompt)])
+    content = msg.content if hasattr(msg, "content") else str(msg)
+    
+    parsed = extract_json_object(str(content))
+    if parsed:
+        return model.model_validate(parsed)
+        
+    raise ValueError(f"Could not extract valid JSON from response: {content}")

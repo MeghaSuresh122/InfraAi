@@ -57,9 +57,26 @@ def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                 f"User text:\n{text}\n\nPartial configs JSON:\n{json.dumps(configs, indent=2)}"
             )
             analysis = invoke_structured(llm, prompt, RequirementAnalysis)
-        except Exception:  # noqa: BLE001
-            logger.exception("Requirement LLM failed; using heuristic fallback")
-            analysis = _heuristic_requirement(text, configs)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Requirement LLM failed")
+            error_payload = {
+                "kind": "requirement_error",
+                "message": f"Requirement analysis failed: {e}",
+                "error": str(e),
+                "text": text,
+                "configs": configs
+            }
+            edited = interrupt(error_payload)
+            if edited and edited.get("retry"):
+                llm = get_chat_model("requirement")
+                prompt = (
+                    "Extract infrastructure requirements as JSON matching the schema. "
+                    "Put unknown keys under extra_configs.\n\n"
+                    f"User text:\n{text}\n\nPartial configs JSON:\n{json.dumps(configs, indent=2)}"
+                )
+                analysis = invoke_structured(llm, prompt, RequirementAnalysis)
+            else:
+                raise RuntimeError(f"Requirement analysis aborted: {e}")
     return {
         "requirement_analysis": analysis.to_state_dict(),
         "events": [{"node": "requirement_analysis", "ok": True}],
@@ -112,9 +129,26 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                 f"Requirements:\n{json.dumps(req, indent=2)}"
             )
             plan = invoke_structured(llm, prompt, ConfigPlan)
-        except Exception:  # noqa: BLE001
-            logger.exception("Config plan LLM failed; using heuristic fallback")
-            plan = _heuristic_plan(req)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Config plan LLM failed")
+            error_payload = {
+                "kind": "config_plan_error",
+                "message": f"Config plan analysis failed: {e}",
+                "error": str(e),
+                "requirements": req
+            }
+            edited = interrupt(error_payload)
+            if edited and edited.get("retry"):
+                llm = get_chat_model("config_plan")
+                prompt = (
+                    "From the requirement JSON, list concrete infra config artifacts. "
+                    "Use types: terraform_eks_cluster, k8s_deployment, terraform_storage. "
+                    "If environment is missing for an item, leave environment null for expansion.\n\n"
+                    f"Requirements:\n{json.dumps(req, indent=2)}"
+                )
+                plan = invoke_structured(llm, prompt, ConfigPlan)
+            else:
+                raise RuntimeError(f"Config plan analysis aborted: {e}")
     items = _expand_plan_items(plan.items, req)
     s = get_settings()
     return {
@@ -227,9 +261,36 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
             if not parsed:
                 raise ValueError("No JSON in builder response")
             fields = parsed
-        except Exception:  # noqa: BLE001
-            logger.exception("Builder LLM failed; using mock fields")
-            fields = _mock_fields(artifact_type, env, region, app)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Builder LLM failed")
+            error_payload = {
+                "kind": "builder_error",
+                "message": f"Infra builder failed for {artifact_type}: {e}",
+                "error": str(e),
+                "artifact_type": artifact_type,
+                "req": req,
+                "item": item
+            }
+            edited = interrupt(error_payload)
+            if edited and edited.get("retry"):
+                llm = get_chat_model("builder")
+                prompt = (
+                    "You populate infrastructure config fields as JSON. "
+                    "Each key maps to an object with keys: value, agent_generated (bool), "
+                    "confidence_score (0-9.9; use 9.9 when taken from user input).\n\n"
+                    f"Requirement JSON:\n{json.dumps(req, indent=2)}\n\n"
+                    f"Current artifact plan item:\n{json.dumps(item, indent=2)}\n\n"
+                    f"Skill:\n{skill}\n\n"
+                    "Return ONLY a JSON object of fields."
+                )
+                msg = llm.invoke([HumanMessage(content=prompt)])
+                content = msg.content if hasattr(msg, "content") else str(msg)
+                parsed = extract_json_object(str(content))
+                if not parsed:
+                    raise ValueError("No JSON in builder response")
+                fields = parsed
+            else:
+                raise RuntimeError(f"Infra builder aborted: {e}")
     return {
         "config_fields_output": fields,
         "events": [{"node": "infra_builder", "artifact": artifact_type}],
@@ -343,10 +404,29 @@ def _codegen_system_messages(artifact: str) -> list[Any]:
                     "   - Providers must not depend on resources created in same plan\n"
                     "4. Prefer module defaults unless customization is required\n"
                     "5. Output only valid, deployable Terraform\n\n"
-                    "After generating:\n"
-                    "- Simulate terraform plan mentally\n"
-                    "- Identify dependency or lifecycle issues\n"
-                    "- Fix them before output\n"
+                    "6. Do not create duplicate terraform blocks across files\n"
+                    "Before generating Terraform:\n"
+                    "- Ensure Kubernetes version is currently supported by AWS EKS\n"
+                    "- Use latest stable versions of Terraform modules unless specified\n"
+                    "- Avoid deprecated provider/module versions\n"
+                    # "After generating:\n"
+                    # "- Simulate terraform plan mentally\n"
+                    # "- Identify dependency or lifecycle issues\n"
+                    # "- Fix them before output\n"
+                    "After generating Terraform:\n"
+                    "1. Validate structure (files, blocks)\n"
+                    "2. Validate AWS compatibility (versions, services)\n"
+                    "3. Identify:\n"
+                    "   - deprecated versions\n"
+                    "   - duplicate blocks\n"
+                    "   - missing best practices\n"
+                    "4. Fix issues automatically\n"
+                    "5. Output final corrected version\n"
+                    "Before final output, verify:\n"
+                    "- No hardcoded availability zones\n"
+                    "- Cluster endpoint access is explicitly defined\n"
+                    "- Cost-impacting resources (NAT Gateway) are intentional\n"
+                    "- Tags are consistently applied\n"
                 )
             )
         ]
@@ -410,9 +490,30 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
             msg = llm.invoke(messages)
             text = str(msg.content)
-        except Exception:  # noqa: BLE001
-            logger.exception("Codegen LLM failed; using stub output")
-            text = _mock_codegen_text()
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Codegen LLM failed")
+            error_payload = {
+                "kind": "codegen_error",
+                "message": f"Codegen failed for artifact '{artifact}': {e}",
+                "error": str(e),
+                "artifact": artifact,
+                "fields": fields
+            }
+            edited = interrupt(error_payload)
+            if edited and edited.get("retry"):
+                # Retry the LLM call
+                llm = get_chat_model("codegen")
+                prompt = (
+                    "Generate infrastructure files. Use markdown sections starting with "
+                    "'### <relative/path>' followed by a fenced code block.\n\n"
+                    f"Artifact type: {artifact}\n"
+                    f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
+                )
+                messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
+                msg = llm.invoke(messages)
+                text = str(msg.content)
+            else:
+                raise RuntimeError(f"Codegen aborted: {e}")
 
     files = _parse_generated_files(text)
     tmp = Path(tempfile.mkdtemp(prefix="infra-ai-codegen-"))

@@ -17,10 +17,10 @@ class Settings(BaseSettings):
     openai_base_url: str = Field(default="http://localhost:11434/v1", alias="OPENAI_BASE_URL")
     openai_api_key: str = Field(default="ollama", alias="OPENAI_API_KEY")
 
-    model_requirement: str = Field(default="qwen2.5:14b", alias="MODEL_REQUIREMENT")
-    model_config_plan: str = Field(default="qwen2.5:14b", alias="MODEL_CONFIG_PLAN")
-    model_builder: str = Field(default="qwen2.5:14b", alias="MODEL_BUILDER")
-    model_validator_soft: str = Field(default="qwen2.5:14b", alias="MODEL_VALIDATOR_SOFT")
+    model_requirement: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_REQUIREMENT")
+    model_config_plan: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_CONFIG_PLAN")
+    model_builder: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_BUILDER")
+    model_validator_soft: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_VALIDATOR_SOFT")
 
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
