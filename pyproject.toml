@@ -21,6 +21,8 @@ dependencies = [
     "gitpython>=3.1.43",
     "httpx>=0.28.0",
     "jsonpatch>=1.33",
+    "requests>=2.32.0",
+    "PyJWT>=2.9.0",
 ]
 
 [project.optional-dependencies]

@@ -1,13 +1,12 @@
-from __future__ import annotations
-
+import base64
 import os
-import shutil
-import tempfile
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from git import Actor, Repo
+import jwt
+import requests
 
 from infra_ai.config import get_settings
 
@@ -40,6 +39,32 @@ def resolve_local_repo_root(url: str) -> Path:
     return Path(u).expanduser().resolve()
 
 
+def parse_github_repo(url: str) -> tuple[str, str] | None:
+    """Parse owner and repo from GitHub URL, e.g., https://github.com/owner/repo -> ('owner', 'repo')."""
+    if url.startswith("git@github.com:"):
+        # Handle git@github.com:owner/repo.git
+        parts = url[len("git@github.com:"):].split("/")
+        if len(parts) >= 2:
+            owner = parts[0]
+            repo = parts[1].rstrip(".git")
+            return owner, repo
+    parsed = urlparse(url)
+    if parsed.hostname == "github.com":
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) >= 2:
+            owner = path_parts[0]
+            repo = path_parts[1].rstrip(".git")
+            return owner, repo
+    elif url.startswith("git@github.com:"):
+        # git@github.com:owner/repo.git
+        parts = url.split(":", 1)[1].split("/")
+        if len(parts) >= 2:
+            owner = parts[0]
+            repo = parts[1].rstrip(".git")
+            return owner, repo
+    return None
+
+
 class GitService:
     """Clone, branch, commit, and push generated files."""
 
@@ -53,7 +78,48 @@ class GitService:
         self.repo_url = repo_url or s.git_repo_url
         self.default_branch = default_branch or s.git_default_branch
         self.remote_name = remote_name or s.git_remote_name
-        self.author = Actor(s.git_author_name, s.git_author_email)
+        self.author_name = s.git_author_name
+        self.author_email = s.git_author_email
+        self.github_client_id = s.github_app_client_id
+        self.github_pem_path = s.github_app_pem_path
+        self.github_installation_id = s.github_app_installation_id
+        self._token_cache: dict[str, tuple[str, float]] = {}  # token: (token, expiry_time)
+
+    def _generate_jwt(self) -> str:
+        """Generate JWT for GitHub App authentication."""
+        with open(self.github_pem_path, "rb") as f:
+            private_key = f.read()
+        now = int(time.time())
+        payload = {
+            "iat": now,
+            "exp": now + 600,  # 10 minutes
+            "iss": self.github_client_id,
+        }
+        return jwt.encode(payload, private_key, algorithm="RS256")
+
+    def _get_access_token(self) -> str:
+        """Get cached or new installation access token."""
+        cache_key = f"{self.github_client_id}_{self.github_installation_id}"
+        if cache_key in self._token_cache:
+            token, expiry = self._token_cache[cache_key]
+            if time.time() < expiry:
+                return token
+
+        jwt_token = self._generate_jwt()
+        url = f"https://api.github.com/app/installations/{self.github_installation_id}/access_tokens"
+        headers = {
+            "Authorization": f"Bearer {jwt_token}",
+            "Accept": "application/vnd.github+json",
+        }
+        response = requests.post(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        token = data["token"]
+        expires_at = data["expires_at"]
+        # Parse expires_at and cache for 1 hour less to be safe
+        expiry_time = time.time() + 3600  # 1 hour
+        self._token_cache[cache_key] = (token, expiry_time)
+        return token
 
     def push_files(
         self,
@@ -66,7 +132,7 @@ class GitService:
         - No ``repo_url``: writes under ``./output/<branch_name>/`` only (no push).
         - Local path (not a remote Git URL): writes under ``<repo_url>/<branch_name>/`` only
           (no clone, no GitHub push).
-        - Remote Git URL: writes under ``./output/...`` then clones, commits, and pushes a new branch.
+        - Remote Git URL: writes under ``./output/...`` then uses GitHub API to create branch and commit files.
         """
         messages: list[str] = []
         branch_name = f"{branch_prefix}-{uuid4().hex[:8]}"
@@ -97,27 +163,90 @@ class GitService:
             )
             return branch_name, messages
 
-        tmp = Path(tempfile.mkdtemp(prefix="infra-ai-git-"))
+        # GitHub API push
         try:
-            repo = Repo.clone_from(self.repo_url, tmp, branch=self.default_branch, depth=1)
-            new_branch = repo.create_head(branch_name)
-            new_branch.checkout()
+            owner_repo = parse_github_repo(self.repo_url)
+            if not owner_repo:
+                raise ValueError(f"Could not parse owner/repo from {self.repo_url}")
+            owner, repo = owner_repo
+            token = self._get_access_token()
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+            }
+
+            # Get base branch SHA
+            base_ref_url = f"https://api.github.com/repos/{owner}/{repo}/git/ref/heads/{self.default_branch}"
+            response = requests.get(base_ref_url, headers=headers)
+            response.raise_for_status()
+            base_sha = response.json()["object"]["sha"]
+
+            # Create new branch
+            new_ref_url = f"https://api.github.com/repos/{owner}/{repo}/git/refs"
+            ref_data = {
+                "ref": f"refs/heads/{branch_name}",
+                "sha": base_sha,
+            }
+            response = requests.post(new_ref_url, headers=headers, json=ref_data)
+            response.raise_for_status()
+            messages.append(f"Created branch {branch_name}")
+
+            # Create blobs
+            blobs = []
             for rel, content in files:
-                dest = tmp / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(content, encoding="utf-8")
-            repo.index.add([f[0] for f in files])
-            repo.index.commit(
-                f"InfraAi: add {branch_prefix} configs",
-                author=self.author,
-                committer=self.author,
-            )
-            origin = repo.remote(name=self.remote_name)
-            origin.push(refspec=f"{branch_name}:{branch_name}")
-            messages.append(f"Pushed branch {branch_name} to origin.")
+                blob_url = f"https://api.github.com/repos/{owner}/{repo}/git/blobs"
+                blob_data = {
+                    "content": content,
+                    "encoding": "utf-8",
+                }
+                response = requests.post(blob_url, headers=headers, json=blob_data)
+                response.raise_for_status()
+                blobs.append({
+                    "path": rel,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": response.json()["sha"],
+                })
+
+            # Get base tree
+            base_commit_url = f"https://api.github.com/repos/{owner}/{repo}/git/commits/{base_sha}"
+            response = requests.get(base_commit_url, headers=headers)
+            response.raise_for_status()
+            base_tree_sha = response.json()["tree"]["sha"]
+
+            # Create new tree
+            tree_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees"
+            tree_data = {
+                "base_tree": base_tree_sha,
+                "tree": blobs,
+            }
+            response = requests.post(tree_url, headers=headers, json=tree_data)
+            response.raise_for_status()
+            new_tree_sha = response.json()["sha"]
+
+            # Create commit
+            commit_url = f"https://api.github.com/repos/{owner}/{repo}/git/commits"
+            commit_data = {
+                "message": f"InfraAi: add {branch_prefix} configs",
+                "author": {
+                    "name": self.author_name,
+                    "email": self.author_email,
+                },
+                "parents": [base_sha],
+                "tree": new_tree_sha,
+            }
+            response = requests.post(commit_url, headers=headers, json=commit_data)
+            response.raise_for_status()
+            new_commit_sha = response.json()["sha"]
+
+            # Update branch ref
+            update_ref_url = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch_name}"
+            update_data = {"sha": new_commit_sha}
+            response = requests.patch(update_ref_url, headers=headers, json=update_data)
+            response.raise_for_status()
+            messages.append(f"Pushed branch {branch_name} to GitHub.")
+
         except Exception as exc:  # noqa: BLE001
-            messages.append(f"Git push failed (local copy still at {out_dir}): {exc}")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            messages.append(f"GitHub API push failed (local copy still at {out_dir}): {exc}")
 
         return branch_name, messages

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     git_author_name: str = Field(default="InfraAi", alias="GIT_AUTHOR_NAME")
     git_author_email: str = Field(default="infra-ai@local", alias="GIT_AUTHOR_EMAIL")
 
+    github_app_client_id: str = Field(default="", alias="GITHUB_APP_CLIENT_ID")
+    github_app_pem_path: str = Field(default="", alias="GITHUB_APP_PEM_PATH")
+    github_app_installation_id: str = Field(default="", alias="GITHUB_APP_INSTALLATION_ID")
+
     milvus_uri: str = Field(default="", alias="MILVUS_URI")
     skill_retrieval_mode: str = Field(default="filesystem", alias="SKILL_RETRIEVAL_MODE")
 
