@@ -46,10 +46,16 @@ def _heuristic_requirement(text: str, configs: dict[str, Any]) -> RequirementAna
 def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
     text = state.get("raw_user_text") or ""
     configs = state.get("raw_user_configs") or {}
+    logger.info("=== REQUIREMENT ANALYSIS STAGE ===")
+    logger.info("User text length: %d chars", len(text))
+    logger.info("Config keys: %s", list(configs.keys()))
+    
     if mock_llm_enabled():
+        logger.debug("Using mock LLM for requirement analysis")
         analysis = _heuristic_requirement(text, configs)
     else:
         try:
+            logger.debug("Invoking LLM for requirement analysis")
             llm = get_chat_model("requirement")
             prompt = (
                 "Extract infrastructure requirements as JSON matching the schema. "
@@ -57,6 +63,7 @@ def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                 f"User text:\n{text}\n\nPartial configs JSON:\n{json.dumps(configs, indent=2)}"
             )
             analysis = invoke_structured(llm, prompt, RequirementAnalysis)
+            logger.info("Requirement analysis completed. App type: %s", analysis.application_type)
         except Exception as e:  # noqa: BLE001
             logger.exception("Requirement LLM failed")
             error_payload = {
@@ -68,6 +75,7 @@ def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
             }
             edited = interrupt(error_payload)
             if edited and edited.get("retry"):
+                logger.info("Retrying requirement analysis after user review")
                 llm = get_chat_model("requirement")
                 prompt = (
                     "Extract infrastructure requirements as JSON matching the schema. "
@@ -75,6 +83,7 @@ def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                     f"User text:\n{text}\n\nPartial configs JSON:\n{json.dumps(configs, indent=2)}"
                 )
                 analysis = invoke_structured(llm, prompt, RequirementAnalysis)
+                logger.info("Requirement analysis retry completed")
             else:
                 raise RuntimeError(f"Requirement analysis aborted: {e}")
     return {
@@ -116,11 +125,14 @@ def _heuristic_plan(req: dict[str, Any]) -> ConfigPlan:
 
 
 def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== CONFIG ANALYSIS STAGE ===")
     req = state.get("requirement_analysis") or {}
     if mock_llm_enabled():
+        logger.debug("Using mock LLM for config analysis")
         plan = _heuristic_plan(req)
     else:
         try:
+            logger.debug("Invoking LLM for config plan generation")
             llm = get_chat_model("config_plan")
             prompt = (
                 "From the requirement JSON, list concrete infra config artifacts. "
@@ -129,6 +141,7 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                 f"Requirements:\n{json.dumps(req, indent=2)}"
             )
             plan = invoke_structured(llm, prompt, ConfigPlan)
+            logger.info("Config plan generated with %d items", len(plan.items))
         except Exception as e:  # noqa: BLE001
             logger.exception("Config plan LLM failed")
             error_payload = {
@@ -139,6 +152,7 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
             }
             edited = interrupt(error_payload)
             if edited and edited.get("retry"):
+                logger.info("Retrying config plan after user review")
                 llm = get_chat_model("config_plan")
                 prompt = (
                     "From the requirement JSON, list concrete infra config artifacts. "
@@ -147,10 +161,13 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                     f"Requirements:\n{json.dumps(req, indent=2)}"
                 )
                 plan = invoke_structured(llm, prompt, ConfigPlan)
+                logger.info("Config plan retry completed")
             else:
                 raise RuntimeError(f"Config plan analysis aborted: {e}")
     items = _expand_plan_items(plan.items, req)
     s = get_settings()
+    logger.info("Final config plan has %d items after expansion", len(items))
+    logger.info("Target branch: %s, Repo: %s", s.git_default_branch, s.git_repo_url)
     return {
         "config_plan": [i.model_dump() for i in items],
         "current_config_index": 0,
@@ -164,12 +181,19 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
 def loop_entry_node(state: InfraGraphState) -> dict[str, Any]:
     plan = state.get("config_plan") or []
     idx = int(state.get("current_config_index") or 0)
+    logger.info("=== LOOP ENTRY ===")
+    logger.info("Processing item %d of %d", idx + 1, len(plan))
+    
     if idx >= len(plan):
+        logger.info("No more items to process. Finalizing workflow.")
         return {
             "workflow_status": "completed",
             "events": [{"node": "loop_entry", "status": "no_more_items"}],
         }
     item = plan[idx]
+    item_id = item.get("id")
+    item_desc = item.get("description", item_id)
+    logger.info("Processing config item: %s - %s", item_id, item_desc)
     return {
         "current_config_item": item,
         "workflow_status": "running",
@@ -229,22 +253,29 @@ def _mock_fields(artifact_type: str, env: str, region: str, app: str) -> dict[st
 
 
 def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== INFRA BUILDER STAGE ===")
     req = state.get("requirement_analysis") or {}
     item = state.get("current_config_item") or {}
     artifact_type = item.get("type") or "k8s_deployment"
+    logger.info("Building artifact: %s", artifact_type)
+    
     skill = load_skill_markdown(artifact_type)
     extra_chunks = query_skill_chunks(json.dumps(req), artifact_type)
     if extra_chunks:
+        logger.info("Retrieved %d skill chunks for artifact", len(extra_chunks))
         skill = skill + "\n\n## Retrieved chunks\n" + "\n".join(extra_chunks)
 
     env = item.get("environment") or "dev"
     region = req.get("region") or "us-east-1"
     app = req.get("application_type") or "app"
+    logger.debug("Artifact config - Env: %s, Region: %s, App: %s", env, region, app)
 
     if mock_llm_enabled():
+        logger.debug("Using mock fields for builder")
         fields = _mock_fields(artifact_type, env, region, app)
     else:
         try:
+            logger.debug("Invoking LLM for infra builder")
             llm = get_chat_model("builder")
             prompt = (
                 "You populate infrastructure config fields as JSON. "
@@ -261,8 +292,9 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
             if not parsed:
                 raise ValueError("No JSON in builder response")
             fields = parsed
+            logger.info("Builder LLM returned %d fields", len(fields))
         except Exception as e:  # noqa: BLE001
-            logger.exception("Builder LLM failed")
+            logger.exception("Builder LLM failed for artifact: %s", artifact_type)
             error_payload = {
                 "kind": "builder_error",
                 "message": f"Infra builder failed for {artifact_type}: {e}",
@@ -273,6 +305,7 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
             }
             edited = interrupt(error_payload)
             if edited and edited.get("retry"):
+                logger.info("Retrying builder after user review")
                 llm = get_chat_model("builder")
                 prompt = (
                     "You populate infrastructure config fields as JSON. "
@@ -289,6 +322,7 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
                 if not parsed:
                     raise ValueError("No JSON in builder response")
                 fields = parsed
+                logger.info("Builder retry completed")
             else:
                 raise RuntimeError(f"Infra builder aborted: {e}")
     return {
@@ -298,20 +332,29 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
 
 
 def infra_validator_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== INFRA VALIDATOR STAGE ===")
     fields = state.get("config_fields_output") or {}
     item = state.get("current_config_item") or {}
     artifact_type = item.get("type") or "k8s_deployment"
+    logger.info("Validating artifact: %s", artifact_type)
+    
     ok, errs = validate_config_fields(fields, artifact_type)
     ok2, errs2 = run_plugins(fields, artifact_type)
     ok = ok and ok2
     errs = errs + errs2
+    
+    if ok:
+        logger.info("Validation passed for artifact: %s", artifact_type)
+    else:
+        logger.warning("Validation failed for artifact: %s. Errors: %s", artifact_type, errs)
+    
     events = [{"node": "infra_validator", "ok": ok, "errors": errs}]
-    if not ok:
-        logger.warning("Validation issues: %s", errs)
     return {"events": events}
 
 
 def human_review_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== HUMAN REVIEW STAGE ===")
+    logger.info("Pausing for human review of configuration fields")
     payload = {
         "kind": "review_fields",
         "config_fields_output": state.get("config_fields_output"),
@@ -320,10 +363,13 @@ def human_review_node(state: InfraGraphState) -> dict[str, Any]:
     edited = interrupt(payload)
     if isinstance(edited, dict) and "config_fields" in edited:
         fields = edited["config_fields"]
+        logger.info("User provided updated fields")
     elif isinstance(edited, dict):
         fields = edited
+        logger.info("User confirmed fields without changes")
     else:
         fields = state.get("config_fields_output") or {}
+        logger.info("Human review completed")
     return {
         "config_fields_output": fields,
         "human_review_status": "reviewed",
@@ -333,12 +379,17 @@ def human_review_node(state: InfraGraphState) -> dict[str, Any]:
 
 
 def human_repo_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== REPO CONFIRMATION STAGE ===")
     s = get_settings()
     repo = state.get("repo_url") or s.git_repo_url
+    target_branch = state.get("target_branch") or s.git_default_branch
+    logger.info("Current repo: %s, Target branch: %s", repo, target_branch)
+    logger.info("Pausing for repo confirmation")
+    
     payload = {
         "kind": "confirm_repo",
         "repo_url": repo,
-        "target_branch": state.get("target_branch") or s.git_default_branch,
+        "target_branch": target_branch,
         "message": (
             "Confirm code generation. Override repo_url: use an https/git URL to clone and push a new branch, "
             "or a filesystem path (e.g. ./my-infra-out or C:/infra-out) to write files locally only (no GitHub push)."
@@ -347,10 +398,12 @@ def human_repo_node(state: InfraGraphState) -> dict[str, Any]:
     conf = interrupt(payload)
     if not isinstance(conf, dict):
         conf = {}
-    if conf.get("repo_url"):
+    if "repo_url" in conf:
         repo = conf["repo_url"]
+        logger.info("User provided override repo_url: %s", repo)
     branch = conf.get("target_branch") or state.get("target_branch") or s.git_default_branch
     confirm = conf.get("confirm", True)
+    logger.info("Repo confirmation received. Confirmed: %s", confirm)
     return {
         "repo_url": repo,
         "target_branch": branch,
@@ -461,9 +514,12 @@ def _terraform_fmt(paths: list[Path]) -> None:
 
 
 def codegen_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== CODEGEN STAGE ===")
     item = state.get("current_config_item") or {}
     fields = state.get("config_fields_output") or {}
     artifact = item.get("type") or "k8s_deployment"
+    logger.info("Generating code for artifact: %s", artifact)
+    
     def _mock_codegen_text() -> str:
         if artifact == "k8s_deployment":
             return (
@@ -477,9 +533,11 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
         )
 
     if mock_llm_enabled():
+        logger.debug("Using mock codegen")
         text = _mock_codegen_text()
     else:
         try:
+            logger.debug("Invoking LLM for code generation")
             llm = get_chat_model("codegen")
             prompt = (
                 "Generate infrastructure files. Use markdown sections starting with "
@@ -490,8 +548,9 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
             msg = llm.invoke(messages)
             text = str(msg.content)
+            logger.info("Code generation completed")
         except Exception as e:  # noqa: BLE001
-            logger.exception("Codegen LLM failed")
+            logger.exception("Codegen LLM failed for artifact: %s", artifact)
             error_payload = {
                 "kind": "codegen_error",
                 "message": f"Codegen failed for artifact '{artifact}': {e}",
@@ -501,6 +560,7 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             }
             edited = interrupt(error_payload)
             if edited and edited.get("retry"):
+                logger.info("Retrying code generation after user review")
                 # Retry the LLM call
                 llm = get_chat_model("codegen")
                 prompt = (
@@ -512,10 +572,13 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
                 messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
                 msg = llm.invoke(messages)
                 text = str(msg.content)
+                logger.info("Code generation retry completed")
             else:
                 raise RuntimeError(f"Codegen aborted: {e}")
 
     files = _parse_generated_files(text)
+    logger.info("Parsed %d files from codegen output", len(files))
+    
     tmp = Path(tempfile.mkdtemp(prefix="infra-ai-codegen-"))
     written_fmt: list[tuple[str, str]] = []
     try:
@@ -523,12 +586,18 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             p = tmp / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(content, encoding="utf-8")
+            logger.debug("Generated file: %s", rel)
+        
         tf_paths = [p for p in tmp.rglob("*.tf") if p.is_file()]
-        _terraform_fmt(tf_paths)
+        if tf_paths:
+            logger.info("Running terraform fmt on %d files", len(tf_paths))
+            _terraform_fmt(tf_paths)
+        
         for rel, _ in files:
             p = tmp / rel
             if p.is_file():
                 written_fmt.append((rel, p.read_text(encoding="utf-8")))
+        logger.info("Generated files ready for push: %d files", len(written_fmt))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -539,16 +608,57 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
 
 
 def git_push_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== GIT PUSH STAGE ===")
     item = state.get("current_config_item") or {}
     gfs = state.get("generated_files") or []
     files = [(g["path"], g["content"]) for g in gfs]
     prefix = str(item.get("id") or "config").replace("/", "-")[:40]
+    logger.info("Pushing %d files to git. Prefix: %s", len(files), prefix)
+    
     svc = GitService(
         repo_url=state.get("repo_url"),
         default_branch=state.get("target_branch"),
         remote_name=state.get("git_remote_name"),
     )
     branch, messages = svc.push_files(files, branch_prefix=prefix)
+    logger.info("Git push result. Branch: %s. Messages: %s", branch, messages)
+    
+    # Check if GitHub API push failed
+    push_failed = any("GitHub API push failed" in msg for msg in messages)
+    if push_failed:
+        error_msg = next(msg for msg in messages if "GitHub API push failed" in msg)
+        logger.error("GitHub API push failed: %s", error_msg)
+        
+        # Extract the actual error from the message
+        error_payload = {
+            "kind": "git_push_error",
+            "message": f"GitHub API push failed. Local copy saved. You can retry after fixing the issue.",
+            "error": error_msg,
+            "repo_url": state.get("repo_url"),
+            "target_branch": state.get("target_branch"),
+            "branch": branch,
+            "messages": messages,
+        }
+        edited = interrupt(error_payload)
+        if edited and edited.get("retry"):
+            logger.info("User requested retry for git push")
+            # Retry push with same branch and files
+            svc = GitService(
+                repo_url=state.get("repo_url"),
+                default_branch=state.get("target_branch"),
+                remote_name=state.get("git_remote_name"),
+            )
+            branch, messages = svc.push_files(files, branch_prefix=prefix)
+            logger.info("Git push retry completed. Branch: %s", branch)
+            # Check again if retry succeeded
+            if any("GitHub API push failed" in msg for msg in messages):
+                logger.error("Git push retry still failed")
+                raise RuntimeError("GitHub API push failed even after retry. Check credentials and network connectivity.")
+        else:
+            logger.error("User did not retry git push")
+            raise RuntimeError(f"GitHub API push failed: {error_msg}")
+    
+    logger.info("Git push completed successfully")
     return {
         "last_git_branch": branch,
         "events": [{"node": "git_push", "messages": messages, "branch": branch}],
@@ -556,8 +666,11 @@ def git_push_node(state: InfraGraphState) -> dict[str, Any]:
 
 
 def human_continue_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== CONTINUE PROMPT STAGE ===")
     item = state.get("current_config_item") or {}
     desc = item.get("description") or item.get("id")
+    logger.info("Asking user to continue after processing: %s", desc)
+    
     payload = {
         "kind": "continue_next",
         "message": f'Code deployed for "{desc}". Continue with next config file?',
@@ -569,6 +682,7 @@ def human_continue_node(state: InfraGraphState) -> dict[str, Any]:
         cont = bool(ans.get("continue_next", True))
     elif isinstance(ans, bool):
         cont = ans
+    
     updates: dict[str, Any] = {
         "last_interrupt_kind": "continue_next",
         "events": [{"node": "human_continue", "continue_next": cont}],
@@ -576,8 +690,10 @@ def human_continue_node(state: InfraGraphState) -> dict[str, Any]:
     if cont:
         idx = int(state.get("current_config_index") or 0)
         updates["current_config_index"] = idx + 1
+        logger.info("User chose to continue. Next index: %d", idx + 1)
     else:
         updates["workflow_status"] = "completed"
+        logger.info("User chose to stop. Workflow will be finalized.")
     return updates
 
 
@@ -588,4 +704,8 @@ def route_after_continue(state: InfraGraphState) -> Literal["loop", "finalize"]:
 
 
 def finalize_node(state: InfraGraphState) -> dict[str, Any]:
-    return {"events": [{"node": "finalize", "status": state.get("workflow_status", "completed")}]}
+    status = state.get("workflow_status", "completed")
+    logger.info("=== FINALIZE STAGE ===")
+    logger.info("Workflow status: %s", status)
+    logger.info("Workflow execution completed successfully")
+    return {"events": [{"node": "finalize", "status": status}]}

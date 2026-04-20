@@ -1,9 +1,12 @@
 from functools import lru_cache
 
+import logging
+
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from infra_ai.graphs.infra_subgraph import build_infra_subgraph
+from infra_ai.logging_config import get_logger
 from infra_ai.nodes.workflow_nodes import (
     codegen_node,
     config_analysis_node,
@@ -19,10 +22,15 @@ from infra_ai.nodes.workflow_nodes import (
 )
 from infra_ai.state import InfraGraphState
 
+logger = get_logger(__name__)
+
 
 @lru_cache(maxsize=1)
 def build_app_graph():
+    logger.debug("Building application graph")
     workflow = StateGraph(InfraGraphState)
+    
+    # Add nodes
     workflow.add_node("requirement_analysis", requirement_analysis_node)
     workflow.add_node("config_analysis", config_analysis_node)
     workflow.add_node("loop_entry", loop_entry_node)
@@ -33,7 +41,9 @@ def build_app_graph():
     workflow.add_node("git_push", git_push_node)
     workflow.add_node("human_continue", human_continue_node)
     workflow.add_node("finalize", finalize_node)
+    logger.debug("Added %d nodes to graph", 10)
 
+    # Add edges
     workflow.add_edge(START, "requirement_analysis")
     workflow.add_edge("requirement_analysis", "config_analysis")
     workflow.add_edge("config_analysis", "loop_entry")
@@ -52,10 +62,13 @@ def build_app_graph():
         route_after_continue,
         {"loop": "loop_entry", "finalize": "finalize"},
     )
-    workflow.add_edge("finalize", END)
+    workflow.add_edge("human_continue", END)
+    logger.debug("Added edges to graph")
 
     checkpointer = MemorySaver()
-    return workflow.compile(checkpointer=checkpointer)
+    graph = workflow.compile(checkpointer=checkpointer)
+    logger.info("Application graph built and compiled successfully")
+    return graph
 
 
 def reset_app_graph_cache() -> None:

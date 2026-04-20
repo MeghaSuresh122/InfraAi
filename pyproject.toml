@@ -23,6 +23,7 @@ dependencies = [
     "jsonpatch>=1.33",
     "requests>=2.32.0",
     "PyJWT>=2.9.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
