@@ -4,10 +4,17 @@ from typing import Any
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
+from contextlib import asynccontextmanager
 
 from infra_ai.runner import invoke_until_interrupt, resume_run
+from infra_ai.logging_config import setup_logging
 
-app = FastAPI(title="InfraAi", version="0.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_logging()
+    yield
+
+app = FastAPI(title="InfraAi", version="0.1.0", lifespan=lifespan)
 
 
 class StartRunBody(BaseModel):
@@ -23,6 +30,8 @@ class ResumeBody(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    import logging
+    logging.getLogger("test_logger").info("HEALTH ENDPOINT CALLED")
     return {"status": "ok"}
 
 

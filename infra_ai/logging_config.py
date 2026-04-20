@@ -23,7 +23,7 @@ def setup_logging(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
-    root_logger = logging.getLogger(__name__)
+    root_logger = logging.getLogger()
     root_logger.setLevel(level)
     
     # Remove any existing handlers
