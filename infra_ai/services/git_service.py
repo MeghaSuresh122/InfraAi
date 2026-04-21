@@ -300,3 +300,42 @@ class GitService:
             messages.append(msg)
 
         return branch_name, messages
+
+    def create_pull_request(self, head_branch: str, title: str, body: str = "") -> str | None:
+        """
+        Create a pull request from head_branch to the default branch.
+        Returns the PR URL if successful, None if failed or not applicable.
+        """
+        if not self.repo_url or not is_remote_git_url(self.repo_url):
+            logger.info("Skipping PR creation: not a remote GitHub repo")
+            return None
+
+        try:
+            owner_repo = parse_github_repo(self.repo_url)
+            if not owner_repo:
+                raise ValueError(f"Could not parse owner/repo from {self.repo_url}")
+            owner, repo = owner_repo
+            logger.info("Creating PR for repo: %s/%s", owner, repo)
+
+            token = self._get_access_token()
+            headers = {
+                "Authorization": f"token {token}",
+                "Accept": "application/vnd.github+json",
+            }
+
+            pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls"
+            pr_data = {
+                "title": title,
+                "head": head_branch,
+                "base": self.default_branch,
+                "body": body,
+            }
+            response = requests.post(pr_url, headers=headers, json=pr_data)
+            response.raise_for_status()
+            pr_data = response.json()
+            pr_html_url = pr_data["html_url"]
+            logger.info("PR created successfully: %s", pr_html_url)
+            return pr_html_url
+        except Exception as exc:
+            logger.exception("PR creation failed")
+            return None

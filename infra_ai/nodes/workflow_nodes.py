@@ -659,9 +659,21 @@ def git_push_node(state: InfraGraphState) -> dict[str, Any]:
             raise RuntimeError(f"GitHub API push failed: {error_msg}")
     
     logger.info("Git push completed successfully")
+    
+    # Create PR if it's a remote GitHub repo
+    pr_url = svc.create_pull_request(
+        head_branch=branch,
+        title=f"InfraAi: {prefix} configs",
+        body=f"Generated infrastructure configs for {item.get('description', item.get('id', 'config'))}\n\nBranch: {branch}"
+    )
+    if pr_url:
+        messages.append(f"PR created: {pr_url}")
+        logger.info("PR created: %s", pr_url)
+    
     return {
         "last_git_branch": branch,
-        "events": [{"node": "git_push", "messages": messages, "branch": branch}],
+        "last_pr_url": pr_url,
+        "events": [{"node": "git_push", "messages": messages, "branch": branch, "pr_url": pr_url}],
     }
 
 
@@ -671,9 +683,15 @@ def human_continue_node(state: InfraGraphState) -> dict[str, Any]:
     desc = item.get("description") or item.get("id")
     logger.info("Asking user to continue after processing: %s", desc)
     
+    pr_url = state.get("last_pr_url")
+    message = f'Code generated for "{desc}".'
+    if pr_url:
+        message += f" PR: {pr_url}."
+    message += " Continue with next config file?"
+    
     payload = {
         "kind": "continue_next",
-        "message": f'Code deployed for "{desc}". Continue with next config file?',
+        "message": message,
         "current_config_item": item,
     }
     ans = interrupt(payload)
