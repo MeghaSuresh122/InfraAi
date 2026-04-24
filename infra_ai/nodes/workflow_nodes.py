@@ -482,6 +482,9 @@ CODE_BLOCK = re.compile(r"```(?:\w+)?\s*\n([\s\S]*?)```", re.MULTILINE)
 
 def _parse_generated_files(text: str) -> list[tuple[str, str]]:
     files: list[tuple[str, str]] = []
+    extracted_json = extract_json_object(text)
+    if extracted_json is not None and extracted_json.get("type", "") == "text" and "text" in extracted_json:
+        text = extracted_json["text"]
     parts = re.split(r"^###\s+", text, flags=re.MULTILINE)
     for part in parts:
         part = part.strip()
@@ -493,7 +496,8 @@ def _parse_generated_files(text: str) -> list[tuple[str, str]]:
         m = CODE_BLOCK.search(body)
         content = m.group(1).strip() if m else body.strip()
         if path_line and ("/" in path_line or path_line.endswith((".tf", ".yaml", ".yml"))):
-            files.append((path_line.split()[0], content))
+            filename = path_line.split()[0].strip("'").strip("\"")
+            files.append((filename, content))
     if not files:
         m = CODE_BLOCK.search(text)
         if m:
