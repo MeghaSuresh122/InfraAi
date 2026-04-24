@@ -5,18 +5,24 @@ import logging
 import re
 import shutil
 import subprocess
+import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import interrupt
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from langchain_mcp_adapters.tools import load_mcp_tools
+from langgraph.prebuilt import create_react_agent
 
 from infra_ai.config import get_settings
 from infra_ai.llm.factory import get_chat_model
 from infra_ai.milvus_store import query_skill_chunks
 from infra_ai.nodes.llm_utils import extract_json_object, invoke_structured, mock_llm_enabled
 from infra_ai.schemas.config_plan import ConfigPlan, ConfigPlanItem
+from infra_ai.schemas.fields import ConfigFieldsEnvelope
 from infra_ai.schemas.requirements import RequirementAnalysis
 from infra_ai.services.git_service import GitService
 from infra_ai.skills.loader import load_skill_markdown
@@ -64,6 +70,8 @@ def requirement_analysis_node(state: InfraGraphState) -> dict[str, Any]:
             )
             analysis = invoke_structured(llm, prompt, RequirementAnalysis)
             logger.info("Requirement analysis completed. App type: %s", analysis.application_type)
+            if analysis.application_type is None:
+                raise Exception("Application type could not be identified by LLM: Retry or try changing the model")
         except Exception as e:  # noqa: BLE001
             logger.exception("Requirement LLM failed")
             error_payload = {
@@ -138,7 +146,8 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                 "From the requirement JSON, list concrete infra config artifacts. "
                 "Use types: terraform_eks_cluster, k8s_deployment, terraform_storage. "
                 "If environment is missing for an item, leave environment null for expansion.\n\n"
-                f"Requirements:\n{json.dumps(req, indent=2)}"
+                f"Requirements:\n{json.dumps(req, indent=2)}\n\n"
+                "Only return a JSON object matching the schema."
             )
             plan = invoke_structured(llm, prompt, ConfigPlan)
             logger.info("Config plan generated with %d items", len(plan.items))
@@ -158,7 +167,8 @@ def config_analysis_node(state: InfraGraphState) -> dict[str, Any]:
                     "From the requirement JSON, list concrete infra config artifacts. "
                     "Use types: terraform_eks_cluster, k8s_deployment, terraform_storage. "
                     "If environment is missing for an item, leave environment null for expansion.\n\n"
-                    f"Requirements:\n{json.dumps(req, indent=2)}"
+                    f"Requirements:\n{json.dumps(req, indent=2)}\n\n"
+                    "Only return a JSON object matching the schema."
                 )
                 plan = invoke_structured(llm, prompt, ConfigPlan)
                 logger.info("Config plan retry completed")
@@ -325,10 +335,65 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
                 logger.info("Builder retry completed")
             else:
                 raise RuntimeError(f"Infra builder aborted: {e}")
-    return {
-        "config_fields_output": fields,
-        "events": [{"node": "infra_builder", "artifact": artifact_type}],
-    }
+    
+    # Validate fields using Pydantic before returning
+    try:
+        validated_fields = ConfigFieldsEnvelope.model_validate({"fields": fields})
+        logger.debug("Fields validated successfully via ConfigFieldsEnvelope")
+        return {
+            "config_fields_output": fields,
+            "events": [{"node": "infra_builder", "artifact": artifact_type}],
+        }
+    except Exception as ve:
+        logger.error("Pydantic validation failed for fields: %s.", ve)
+        if fields.get("type", "") == "text" and "text" in fields:
+            parsed_fields = extract_json_object(str(fields["text"]))
+            if not parsed_fields:
+                raise ValueError("No JSON in builder response")
+            fields = parsed_fields
+            try:
+                validated_fields = ConfigFieldsEnvelope.model_validate({"fields": fields})
+                logger.debug("Fields validated successfully via ConfigFieldsEnvelope in second attempt after extracting from text")
+                return {
+                    "config_fields_output": fields,
+                    "events": [{"node": "infra_builder", "artifact": artifact_type}],
+                }
+            except Exception as ve2:
+                logger.error("Pydantic validation failed for fields after second attempt: %s.", ve2)
+        
+        error_payload = {
+            "kind": "field_validation_error",
+            "message": f"Field validation failed: {ve}",
+            "error": str(ve),
+            "fields": fields,
+            "artifact_type": artifact_type,
+        }
+        edited = interrupt(error_payload)
+        if edited and edited.get("retry"):
+            logger.info("Retrying infra builder after field validation error")
+            # Retry the entire builder LLM call
+            llm = get_chat_model("builder")
+            prompt = (
+                "You populate infrastructure config fields as JSON. "
+                "Each key maps to an object with keys: value, agent_generated (bool), "
+                "confidence_score (0-9.9; use 9.9 when taken from user input).\n\n"
+                f"Requirement JSON:\n{json.dumps(req, indent=2)}\n\n"
+                f"Current artifact plan item:\n{json.dumps(item, indent=2)}\n\n"
+                f"Skill:\n{skill}\n\n"
+                "Return ONLY a JSON object of fields."
+            )
+            msg = llm.invoke([HumanMessage(content=prompt)])
+            content = msg.content if hasattr(msg, "content") else str(msg)
+            parsed = extract_json_object(str(content))
+            if not parsed:
+                raise ValueError("No JSON in builder response")
+            fields = parsed
+            logger.info("Builder retry completed")
+            # Validate again after retry
+            validated_fields = ConfigFieldsEnvelope.model_validate({"fields": fields})
+        else:
+            raise ValueError(f"Infra builder returned invalid fields that failed validation: {ve}")
+    
 
 
 def infra_validator_node(state: InfraGraphState) -> dict[str, Any]:

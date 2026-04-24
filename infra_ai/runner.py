@@ -74,3 +74,27 @@ def resume_run(
     except Exception as e:
         logger.exception("Workflow resume failed for thread_id: %s", thread_id)
         raise
+
+
+def retry_run(
+    thread_id: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """
+    Retry a run from the last successful checkpoint (e.g. after a node failure).
+    Returns (state_dict, interrupts_json).
+    """
+    logger.info("Retrying workflow for thread_id: %s", thread_id)
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    graph = build_app_graph()
+    try:
+        # Pass None as input to resume from the last successful checkpoint
+        result = graph.invoke(None, config)
+        if isinstance(result, dict) and INTERRUPT_KEY in result:
+            ints = _serialize_interrupts(result.pop(INTERRUPT_KEY))
+            logger.info("Workflow paused at interrupt after retry. Count: %d", len(ints))
+            return result, ints
+        logger.info("Workflow completed after retry")
+        return result if isinstance(result, dict) else {}, []
+    except Exception as e:
+        logger.exception("Workflow retry failed for thread_id: %s", thread_id)
+        raise

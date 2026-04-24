@@ -2,8 +2,12 @@ from functools import lru_cache
 
 import logging
 
-from langgraph.checkpoint.memory import MemorySaver
+import sqlite3
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+
+# Initialize sqlite connection for checkpoints
+_sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
 
 from infra_ai.graphs.infra_subgraph import build_infra_subgraph
 from infra_ai.logging_config import get_logger
@@ -65,7 +69,8 @@ def build_app_graph():
     workflow.add_edge("human_continue", END)
     logger.debug("Added edges to graph")
 
-    checkpointer = MemorySaver()
+    checkpointer = SqliteSaver(_sqlite_conn)
+    checkpointer.setup()
     graph = workflow.compile(checkpointer=checkpointer)
     logger.info("Application graph built and compiled successfully")
     return graph

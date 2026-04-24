@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 
-from infra_ai.runner import invoke_until_interrupt, resume_run
+from infra_ai.runner import invoke_until_interrupt, resume_run, retry_run
 from infra_ai.logging_config import setup_logging
 
 @asynccontextmanager
@@ -49,4 +49,11 @@ def resume(thread_id: str, body: ResumeBody) -> dict[str, Any]:
     state, interrupts = resume_run(
         thread_id, body.resume, update=body.state_update
     )
+    return {"thread_id": thread_id, "state": state, "interrupts": interrupts}
+
+
+@app.post("/v1/runs/{thread_id}/retry")
+def retry(thread_id: str) -> dict[str, Any]:
+    """Retry a failed flow from the last successful node."""
+    state, interrupts = retry_run(thread_id)
     return {"thread_id": thread_id, "state": state, "interrupts": interrupts}
