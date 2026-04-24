@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
     groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
 
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+
     git_repo_url: str = Field(default="", alias="GIT_REPO_URL")
     git_default_branch: str = Field(default="main", alias="GIT_DEFAULT_BRANCH")
     git_remote_name: str = Field(default="origin", alias="GIT_REMOTE_NAME")

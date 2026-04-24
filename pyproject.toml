@@ -15,6 +15,7 @@ dependencies = [
     "langchain-core>=0.3.30",
     "langchain-openai>=0.3.0",
     "langchain-ollama>=0.2.0",
+    "langchain-google-genai>=0.1.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
     "pyyaml>=6.0.2",
@@ -24,6 +25,8 @@ dependencies = [
     "requests>=2.32.0",
     "PyJWT>=2.9.0",
     "cryptography>=42.0.0",
+    "mcp>=1.1.2",
+    "langchain-mcp-adapters>=0.1.0",
 ]
 
 [project.optional-dependencies]

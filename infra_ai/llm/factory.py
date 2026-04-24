@@ -2,6 +2,7 @@ from typing import Literal
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from infra_ai.config import get_settings
 
@@ -54,6 +55,19 @@ def get_chat_model(role: Role) -> BaseChatModel:
         api_key = s.groq_api_key
         model_kwargs = {}
         default_headers = None
+    elif provider == "gemini":
+        if not s.gemini_api_key:
+            raise ValueError(
+                "GEMINI_API_KEY is required for Gemini provider. "
+                "Set it in the environment or .env file."
+            )
+        # Gemini uses a different client
+        return ChatGoogleGenerativeAI(
+            model=model_name,
+            google_api_key=s.gemini_api_key,
+            temperature=0.2 if role == "codegen" else 0.1,
+            max_tokens=2048,
+        )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")
 
