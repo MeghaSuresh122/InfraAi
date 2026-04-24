@@ -23,6 +23,7 @@ class InfraGraphState(TypedDict, total=False):
     human_review_status: str
     generated_files: list[dict[str, Any]]
     last_git_branch: str
+    last_pr_url: str
     last_interrupt_kind: Literal["review_fields", "confirm_repo", "continue_next", ""] | str
     workflow_status: Literal["running", "completed", "aborted"] | str
     events: Annotated[list[dict[str, Any]], operator.add]

@@ -21,12 +21,21 @@ class Settings(BaseSettings):
     model_config_plan: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_CONFIG_PLAN")
     model_builder: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_BUILDER")
     model_validator_soft: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_VALIDATOR_SOFT")
+    model_codegen: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_CODEGEN")
+
+    llm_provider_requirement: str = Field(default="openrouter", alias="LLM_PROVIDER_REQUIREMENT")
+    llm_provider_config_plan: str = Field(default="openrouter", alias="LLM_PROVIDER_CONFIG_PLAN")
+    llm_provider_builder: str = Field(default="openrouter", alias="LLM_PROVIDER_BUILDER")
+    llm_provider_validator_soft: str = Field(default="openrouter", alias="LLM_PROVIDER_VALIDATOR_SOFT")
+    llm_provider_codegen: str = Field(default="openrouter", alias="LLM_PROVIDER_CODEGEN")
 
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
     )
     openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
-    model_codegen: str = Field(default="minimax/minimax-m2.5:free", alias="MODEL_CODEGEN")
+
+    groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
+    groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
 
     git_repo_url: str = Field(default="", alias="GIT_REPO_URL")
     git_default_branch: str = Field(default="main", alias="GIT_DEFAULT_BRANCH")
