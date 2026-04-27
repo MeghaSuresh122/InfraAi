@@ -29,6 +29,7 @@ from infra_ai.skills.loader import load_skill_markdown
 from infra_ai.state import InfraGraphState
 from infra_ai.validation.deterministic import validate_config_fields
 from infra_ai.validation.plugins import run_plugins
+from infra_ai.nodes.tools import ToolsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -608,15 +609,26 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
         try:
             logger.debug("Invoking LLM for code generation")
             llm = get_chat_model("codegen")
+
+            # Load tools
+            tools_loader = ToolsLoader()
+            tools = tools_loader._load_all_tools()
+            llm_with_tools = llm.bind_tools(tools)
+            # Create a list of available tool names for the system message
+            tool_names = [tool.name for tool in tools]
+
             prompt = (
                 "Generate infrastructure files. Use markdown sections starting with "
                 "'### <relative/path>' followed by a fenced code block.\n\n"
                 f"Artifact type: {artifact}\n"
                 f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
+                "You have access to specialized MCP tools for getting knowledge on different platforms.\n"
+                "For generating terraform code, you MUST make use of the appropriate Terraform MCP tools.\n"
+                f"\n\nAvailable tools: {', '.join(tool_names)}\n"
             )
             messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
-            msg = llm.invoke(messages)
-            text = str(msg.content)
+            msg = llm_with_tools.invoke(messages)
+            # text = str(msg.content)
             logger.info("Code generation completed")
         except Exception as e:  # noqa: BLE001
             logger.exception("Codegen LLM failed for artifact: %s", artifact)
@@ -631,20 +643,55 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             if edited and edited.get("retry"):
                 logger.info("Retrying code generation after user review")
                 # Retry the LLM call
-                llm = get_chat_model("codegen")
-                prompt = (
-                    "Generate infrastructure files. Use markdown sections starting with "
-                    "'### <relative/path>' followed by a fenced code block.\n\n"
-                    f"Artifact type: {artifact}\n"
-                    f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
-                )
-                messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
-                msg = llm.invoke(messages)
-                text = str(msg.content)
+                # llm = get_chat_model("codegen")
+                # prompt = (
+                #     "Generate infrastructure files. Use markdown sections starting with "
+                #     "'### <relative/path>' followed by a fenced code block.\n\n"
+                #     f"Artifact type: {artifact}\n"
+                #     f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
+                # )
+                # messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
+                msg = llm_with_tools.invoke(messages)
+                # text = str(msg.content)
                 logger.info("Code generation retry completed")
             else:
                 raise RuntimeError(f"Codegen aborted: {e}")
 
+    return {"messages": [msg]}
+    # files = _parse_generated_files(text)
+    # logger.info("Parsed %d files from codegen output", len(files))
+    
+    # tmp = Path(tempfile.mkdtemp(prefix="infra-ai-codegen-"))
+    # written_fmt: list[tuple[str, str]] = []
+    # try:
+    #     for rel, content in files:
+    #         p = tmp / rel
+    #         p.parent.mkdir(parents=True, exist_ok=True)
+    #         p.write_text(content, encoding="utf-8")
+    #         logger.debug("Generated file: %s", rel)
+        
+    #     tf_paths = [p for p in tmp.rglob("*.tf") if p.is_file()]
+    #     if tf_paths:
+    #         logger.info("Running terraform fmt on %d files", len(tf_paths))
+    #         _terraform_fmt(tf_paths)
+        
+    #     for rel, _ in files:
+    #         p = tmp / rel
+    #         if p.is_file():
+    #             written_fmt.append((rel, p.read_text(encoding="utf-8")))
+    #     logger.info("Generated files ready for push: %d files", len(written_fmt))
+    # finally:
+    #     shutil.rmtree(tmp, ignore_errors=True)
+
+    # return {
+    #     "generated_files": [{"path": r, "content": c} for r, c in written_fmt],
+    #     "events": [{"node": "codegen", "files": len(written_fmt)}],
+    # }
+
+
+def git_push_node(state: InfraGraphState) -> dict[str, Any]:
+    logger.info("=== CODE GEN OUTPUT PROCESSING ===")
+    text = str(state.get("messages", [])[-1].content) if state.get("messages") else ""
     files = _parse_generated_files(text)
     logger.info("Parsed %d files from codegen output", len(files))
     
@@ -670,13 +717,11 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    return {
+    state.update({
         "generated_files": [{"path": r, "content": c} for r, c in written_fmt],
         "events": [{"node": "codegen", "files": len(written_fmt)}],
-    }
+    })
 
-
-def git_push_node(state: InfraGraphState) -> dict[str, Any]:
     logger.info("=== GIT PUSH STAGE ===")
     item = state.get("current_config_item") or {}
     gfs = state.get("generated_files") or []

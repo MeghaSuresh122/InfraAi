@@ -212,3 +212,5 @@ __marimo__/
 .cursor
 .vscode
 my-generated-infra*
+*.sqlite*
+accurate_output

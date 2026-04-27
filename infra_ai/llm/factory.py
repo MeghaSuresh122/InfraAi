@@ -67,6 +67,7 @@ def get_chat_model(role: Role) -> BaseChatModel:
             google_api_key=s.gemini_api_key,
             temperature=0.2 if role == "codegen" else 0.1,
             max_tokens=2048,
+            max_retries=4
         )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

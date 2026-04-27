@@ -5,6 +5,7 @@ import logging
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
 
 # Initialize sqlite connection for checkpoints
 _sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
@@ -25,6 +26,7 @@ from infra_ai.nodes.workflow_nodes import (
     route_after_loop,
 )
 from infra_ai.state import InfraGraphState
+from infra_ai.nodes.tools import ToolsLoader
 
 logger = get_logger(__name__)
 
@@ -42,6 +44,10 @@ def build_app_graph():
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("human_repo", human_repo_node)
     workflow.add_node("codegen", codegen_node)
+
+    tools = ToolsLoader()._load_all_tools()
+    workflow.add_node("codegen_tools", ToolNode(tools))
+    
     workflow.add_node("git_push", git_push_node)
     workflow.add_node("human_continue", human_continue_node)
     workflow.add_node("finalize", finalize_node)
@@ -59,7 +65,16 @@ def build_app_graph():
     workflow.add_edge("infra", "human_review")
     workflow.add_edge("human_review", "human_repo")
     workflow.add_edge("human_repo", "codegen")
-    workflow.add_edge("codegen", "git_push")
+    workflow.add_conditional_edges(
+        "codegen",
+        tools_condition,
+        {
+            "tools": "codegen_tools",
+            "__end__": "git_push"
+        }
+    )
+    workflow.add_edge("codegen_tools", "codegen")
+    # workflow.add_edge("codegen", "git_push")
     workflow.add_edge("git_push", "human_continue")
     workflow.add_conditional_edges(
         "human_continue",
