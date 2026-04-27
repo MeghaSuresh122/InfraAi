@@ -3,12 +3,13 @@ import asyncio
 
 from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
-from langchain_mcp_adapters.sessions import StdioConnection, SSEConnection
+from langchain_mcp_adapters.sessions import StdioConnection, SSEConnection, StreamableHttpConnection
 from infra_ai.nodes.tools_logger import tool_logger
 
 class ToolsLoader:
     def __init__(self, tools_config_path: str = "infra_ai/nodes/tools_config.json"):
         self.config_path = tools_config_path
+        self.tools = None
 
     async def load_mcp_servers_from_config(self):
         with open(self.config_path, 'r') as f:
@@ -25,6 +26,8 @@ class ToolsLoader:
                 )
             elif server_type == "sse":
                 connection = SSEConnection(transport="sse", url=server_config.get("url"))
+            elif server_type.lower() in ("streamablehttp", "streamable_http", "http"):
+                connection = StreamableHttpConnection(transport="streamable_http", url=server_config.get("url"))
             if connection:
                 tools = await load_mcp_tools(session=None, connection=connection)
                 all_tools.extend(tools)
@@ -36,7 +39,8 @@ class ToolsLoader:
     
     def _load_all_tools(self):
         # load custom tools and mcp tools
-        return self._load_mcp_tools()
+        self.tools = self._load_mcp_tools()
+        return self.tools
 
     def _load_mcp_tools(self):
        mcp_tools = self.load_mcp_servers_sync()
@@ -58,7 +62,10 @@ class ToolsLoader:
             # If the tool is async-only, run its async method in a new event loop
             if not hasattr(tool, "invoke"):
                 return asyncio.run(tool.ainvoke(kwargs))
-            return tool.invoke(kwargs)
+            try:
+                return tool.invoke(kwargs)
+            except NotImplementedError:
+                return asyncio.run(tool.ainvoke(kwargs))
         return sync_wrapper
 
     def _make_async_wrapper(self, tool):
@@ -67,3 +74,6 @@ class ToolsLoader:
             # Directly call the async method
             return await tool.ainvoke(kwargs)
         return async_wrapper
+
+# Initialize global tools loader and load tools
+global_tools_loader = ToolsLoader()

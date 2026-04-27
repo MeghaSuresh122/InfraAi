@@ -26,7 +26,7 @@ from infra_ai.nodes.workflow_nodes import (
     route_after_loop,
 )
 from infra_ai.state import InfraGraphState
-from infra_ai.nodes.tools import ToolsLoader
+from infra_ai.nodes.tools import global_tools_loader
 
 logger = get_logger(__name__)
 
@@ -45,7 +45,8 @@ def build_app_graph():
     workflow.add_node("human_repo", human_repo_node)
     workflow.add_node("codegen", codegen_node)
 
-    tools = ToolsLoader()._load_all_tools()
+    # tools = ToolsLoader()._load_all_tools()
+    tools = global_tools_loader._load_all_tools()
     workflow.add_node("codegen_tools", ToolNode(tools))
     
     workflow.add_node("git_push", git_push_node)
