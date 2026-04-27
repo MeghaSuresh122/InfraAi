@@ -29,7 +29,7 @@ from infra_ai.skills.loader import load_skill_markdown
 from infra_ai.state import InfraGraphState
 from infra_ai.validation.deterministic import validate_config_fields
 from infra_ai.validation.plugins import run_plugins
-from infra_ai.nodes.tools import ToolsLoader
+from infra_ai.nodes.tools import global_tools_loader
 from infra_ai.nodes.tools_logger import tool_logger
 
 logger = logging.getLogger(__name__)
@@ -613,8 +613,9 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             llm = get_chat_model("codegen")
 
             # Load tools
-            tools_loader = ToolsLoader()
-            tools = tools_loader._load_all_tools()
+            # tools_loader = ToolsLoader()
+            # tools = tools_loader._load_all_tools()
+            tools = global_tools_loader.tools
             llm_with_tools = llm.bind_tools(tools)
             # Create a list of available tool names for the system message
             tool_names = [tool.name for tool in tools]
