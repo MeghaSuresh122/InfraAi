@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, Dict, List, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -27,3 +27,4 @@ class InfraGraphState(TypedDict, total=False):
     last_interrupt_kind: Literal["review_fields", "confirm_repo", "continue_next", ""] | str
     workflow_status: Literal["running", "completed", "aborted"] | str
     events: Annotated[list[dict[str, Any]], operator.add]
+    tool_call_logs: List[Dict[str, Any]]

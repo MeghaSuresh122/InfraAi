@@ -4,6 +4,7 @@ import asyncio
 from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_mcp_adapters.sessions import StdioConnection, SSEConnection
+from infra_ai.nodes.tools_logger import tool_logger
 
 class ToolsLoader:
     def __init__(self, tools_config_path: str = "infra_ai/nodes/tools_config.json"):
@@ -52,15 +53,17 @@ class ToolsLoader:
        )
     
     def _make_sync_wrapper(self, tool):
-       def sync_wrapper(**kwargs):
-           # If the tool is async-only, run its async method in a new event loop
-           if not hasattr(tool, "invoke"):
-               return asyncio.run(tool.ainvoke(kwargs))
-           return tool.invoke(kwargs)
-       return sync_wrapper
+        def sync_wrapper(**kwargs):
+            tool_logger.log(tool.name, kwargs)
+            # If the tool is async-only, run its async method in a new event loop
+            if not hasattr(tool, "invoke"):
+                return asyncio.run(tool.ainvoke(kwargs))
+            return tool.invoke(kwargs)
+        return sync_wrapper
 
     def _make_async_wrapper(self, tool):
-       async def async_wrapper(**kwargs):
-           # Directly call the async method
-           return await tool.ainvoke(kwargs)
-       return async_wrapper
+        async def async_wrapper(**kwargs):
+            tool_logger.log(tool.name, kwargs)
+            # Directly call the async method
+            return await tool.ainvoke(kwargs)
+        return async_wrapper

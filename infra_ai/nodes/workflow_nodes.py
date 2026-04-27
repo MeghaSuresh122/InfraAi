@@ -30,6 +30,7 @@ from infra_ai.state import InfraGraphState
 from infra_ai.validation.deterministic import validate_config_fields
 from infra_ai.validation.plugins import run_plugins
 from infra_ai.nodes.tools import ToolsLoader
+from infra_ai.nodes.tools_logger import tool_logger
 
 logger = logging.getLogger(__name__)
 
@@ -585,6 +586,7 @@ def _terraform_fmt(paths: list[Path]) -> None:
 
 def codegen_node(state: InfraGraphState) -> dict[str, Any]:
     logger.info("=== CODEGEN STAGE ===")
+    tool_logger.reset() # reset logs before node starts
     item = state.get("current_config_item") or {}
     fields = state.get("config_fields_output") or {}
     artifact = item.get("type") or "k8s_deployment"
@@ -656,8 +658,16 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
                 logger.info("Code generation retry completed")
             else:
                 raise RuntimeError(f"Codegen aborted: {e}")
+    
+    calls = tool_logger.get_calls()
+    logger.info("==== TOOL CALLS COMPLETED ====")
+    for c in calls:
+        logger.info(f"Tool: {c['tool']} | Args: {c['args']}")
+    logger.info(f"Total tool calls: {tool_logger.count()}")
 
-    return {"messages": [msg]}
+    return {
+        "messages": [msg]
+    }
     # files = _parse_generated_files(text)
     # logger.info("Parsed %d files from codegen output", len(files))
     
