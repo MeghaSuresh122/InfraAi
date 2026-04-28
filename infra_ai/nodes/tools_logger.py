@@ -20,4 +20,4 @@ class ToolCallLogger:
 
 
 # global instance
-tool_logger = ToolCallLogger()
+# tool_logger = ToolCallLogger()

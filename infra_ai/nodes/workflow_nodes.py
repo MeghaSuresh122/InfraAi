@@ -10,12 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.types import interrupt
-from mcp import ClientSession
-from mcp.client.sse import sse_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage
+from langgraph.types import Command, interrupt
 
 from infra_ai.config import get_settings
 from infra_ai.llm.factory import get_chat_model
@@ -30,7 +26,7 @@ from infra_ai.state import InfraGraphState
 from infra_ai.validation.deterministic import validate_config_fields
 from infra_ai.validation.plugins import run_plugins
 from infra_ai.nodes.tools import global_tools_loader
-from infra_ai.nodes.tools_logger import tool_logger
+# from infra_ai.nodes.tools_logger import tool_logger
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +216,17 @@ def route_after_loop(state: InfraGraphState) -> Literal["infra", "finalize"]:
         return "finalize"
     return "infra"
 
+def clear_messages_node(state: InfraGraphState):
+    logger.info("Clearing messages before next code generation")
+    return Command(
+        update={
+            "messages": [
+                RemoveMessage(id=m.id) for m in state.get("messages", [])
+            ],  # fully replaces message list,
+            "tool_calls": [],
+            "tool_call_count": 0
+        }
+    )
 
 def _envelope(value: Any, agent_generated: bool, confidence: float) -> dict[str, Any]:
     return {
@@ -296,7 +303,7 @@ def infra_builder_node(state: InfraGraphState) -> dict[str, Any]:
                 f"Requirement JSON:\n{json.dumps(req, indent=2)}\n\n"
                 f"Current artifact plan item:\n{json.dumps(item, indent=2)}\n\n"
                 f"Skill:\n{skill}\n\n"
-                "Return ONLY a JSON object of fields."
+                "Return ONLY a JSON object of fields. Return object must be a valid json object. Do not include any explanations, only return the JSON object."
             )
             msg = llm.invoke([HumanMessage(content=prompt)])
             content = msg.content if hasattr(msg, "content") else str(msg)
@@ -508,10 +515,26 @@ def _parse_generated_files(text: str) -> list[tuple[str, str]]:
 
 
 def _codegen_system_messages(artifact: str) -> list[Any]:
+    base_system_message = (
+        "You have access to specialized MCP tools for getting knowledge on different platforms.\n"
+        "For generating terraform code, you MUST make use of the appropriate Terraform MCP tools.\n"
+        "Rules:\n"
+        "- Call each tool at most once\n"
+        "- After receiving tool results, you MUST produce final output\n"
+        "- DO NOT call the same tool again\n"
+        "- If tool results are already available, use them directly\n"
+        "- Prefer completing the task over calling tools again"
+        "When MCP tool results are available:\n"
+        "- Use them to update the code\n"
+        "- DO NOT call the same tool again\n"
+        "- If sufficient information is available, produce final output WITHOUT tool calls"
+    )
+    
     if artifact.startswith("terraform_"):
         return [
             SystemMessage(
                 content=(
+                    base_system_message +
                     "You are a Terraform expert.\n\n"
                     "Use terraform-aws-modules/eks/aws best practices.\n"
                     "Follow this pattern:\n"
@@ -557,6 +580,7 @@ def _codegen_system_messages(artifact: str) -> list[Any]:
     return [
         SystemMessage(
             content=(
+                base_system_message +
                 "You are a Kubernetes manifest expert.\n\n"
                 "Generate valid Kubernetes YAML only.\n"
                 "Do not include Terraform or EKS cluster creation resources.\n"
@@ -586,7 +610,7 @@ def _terraform_fmt(paths: list[Path]) -> None:
 
 def codegen_node(state: InfraGraphState) -> dict[str, Any]:
     logger.info("=== CODEGEN STAGE ===")
-    tool_logger.reset() # reset logs before node starts
+    # tool_logger.reset() # reset logs before node starts
     item = state.get("current_config_item") or {}
     fields = state.get("config_fields_output") or {}
     artifact = item.get("type") or "k8s_deployment"
@@ -625,11 +649,13 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
                 "'### <relative/path>' followed by a fenced code block.\n\n"
                 f"Artifact type: {artifact}\n"
                 f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
-                "You have access to specialized MCP tools for getting knowledge on different platforms.\n"
-                "For generating terraform code, you MUST make use of the appropriate Terraform MCP tools.\n"
                 f"\n\nAvailable tools: {', '.join(tool_names)}\n"
             )
-            messages = _codegen_system_messages(artifact) + [HumanMessage(content=prompt)]
+            messages = (
+                _codegen_system_messages(artifact) +
+                [HumanMessage(content=prompt)] +
+                state["messages"]
+            )
             msg = llm_with_tools.invoke(messages)
             # text = str(msg.content)
             logger.info("Code generation completed")
@@ -660,14 +686,33 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             else:
                 raise RuntimeError(f"Codegen aborted: {e}")
     
-    calls = tool_logger.get_calls()
-    logger.info("==== TOOL CALLS COMPLETED ====")
-    for c in calls:
+    if hasattr(msg, "tool_calls"):
+        for tc in msg.tool_calls:
+            # if "arguments" in tc:
+            #     tc["arguments"]["_tool_calls"] = state["tool_calls"] if "tool_calls" in state else []
+            # elif "args" in tc:
+            #     tc["args"]["_tool_calls"] = state["tool_calls"] if "tool_calls" in state else []
+            # else:
+            #     tc["arguments"] = {}
+            
+            tool_call_log = {
+                "tool": tc.get('name'),
+                "args": tc.get('arguments') or tc.get('args')
+            }
+            if "tool_calls" not in state:
+                state["tool_calls"] = []
+            state["tool_calls"].append(tool_call_log)
+            
+    # calls = tool_logger.get_calls()
+    logger.info("==== TOOL CALLS ====")
+    for c in state.get("tool_calls", []):
         logger.info(f"Tool: {c['tool']} | Args: {c['args']}")
-    logger.info(f"Total tool calls: {tool_logger.count()}")
+    logger.info(f"Total tool calls: {len(state.get("tool_calls", []))}")
 
     return {
-        "messages": [msg]
+        "messages": [msg],
+        "tool_calls": state.get("tool_calls", []),
+        "tool_call_count": len(state.get("tool_calls", []))
     }
     # files = _parse_generated_files(text)
     # logger.info("Parsed %d files from codegen output", len(files))

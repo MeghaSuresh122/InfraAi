@@ -5,7 +5,7 @@ import logging
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode #, tools_condition
 
 # Initialize sqlite connection for checkpoints
 _sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
@@ -24,6 +24,7 @@ from infra_ai.nodes.workflow_nodes import (
     requirement_analysis_node,
     route_after_continue,
     route_after_loop,
+    clear_messages_node
 )
 from infra_ai.state import InfraGraphState
 from infra_ai.nodes.tools import global_tools_loader
@@ -43,6 +44,7 @@ def build_app_graph():
     workflow.add_node("infra", build_infra_subgraph())
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("human_repo", human_repo_node)
+    workflow.add_node("clear_messages", clear_messages_node)
     workflow.add_node("codegen", codegen_node)
 
     # tools = ToolsLoader()._load_all_tools()
@@ -65,7 +67,9 @@ def build_app_graph():
     )
     workflow.add_edge("infra", "human_review")
     workflow.add_edge("human_review", "human_repo")
-    workflow.add_edge("human_repo", "codegen")
+    workflow.add_edge("human_repo", "clear_messages")
+    workflow.add_edge("clear_messages", "codegen")
+    from infra_ai.nodes.tools import tools_condition
     workflow.add_conditional_edges(
         "codegen",
         tools_condition,

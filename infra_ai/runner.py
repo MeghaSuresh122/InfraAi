@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from langgraph.types import Command
+from langchain_core.messages import RemoveMessage
 
 from infra_ai.graphs.main import build_app_graph
 from infra_ai.logging_config import get_logger
@@ -86,9 +87,16 @@ def retry_run(
     logger.info("Retrying workflow for thread_id: %s", thread_id)
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     graph = build_app_graph()
+    cmd = Command(update={
+        "messages": [
+            RemoveMessage(id=m.id) for m in graph.get_state(config).values.get("messages", [])
+        ],
+        "tool_calls": [],
+        "tool_call_count": 0
+    })
     try:
         # Pass None as input to resume from the last successful checkpoint
-        result = graph.invoke(None, config)
+        result = graph.invoke(cmd, config)
         if isinstance(result, dict) and INTERRUPT_KEY in result:
             ints = _serialize_interrupts(result.pop(INTERRUPT_KEY))
             logger.info("Workflow paused at interrupt after retry. Count: %d", len(ints))

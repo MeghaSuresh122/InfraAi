@@ -27,4 +27,5 @@ class InfraGraphState(TypedDict, total=False):
     last_interrupt_kind: Literal["review_fields", "confirm_repo", "continue_next", ""] | str
     workflow_status: Literal["running", "completed", "aborted"] | str
     events: Annotated[list[dict[str, Any]], operator.add]
-    tool_call_logs: List[Dict[str, Any]]
+    tool_calls: List[Dict[str, Any]]
+    tool_call_count: int
