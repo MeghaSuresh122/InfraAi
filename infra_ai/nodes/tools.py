@@ -93,8 +93,8 @@ def tools_condition(
     if ( hasattr(ai_message, "tool_calls")
             and
         len(ai_message.tool_calls) > 0
-            and
-        state.get("tool_call_count", 0) <= 3 # Custom: max 3 tool calls
+        #     and
+        # state.get("tool_call_count", 0) <= 3 # Custom: max 3 tool calls
     ):
         return "tools"
     return "__end__"

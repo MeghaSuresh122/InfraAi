@@ -28,6 +28,7 @@ from infra_ai.nodes.infra_nodes import (
 from infra_ai.nodes.codegen_nodes import (
     codegen_node,
     git_push_node,
+    route_after_git_push
 )
 from infra_ai.nodes.continuation_nodes import (
     human_continue_node,
@@ -88,7 +89,12 @@ def build_app_graph():
     )
     workflow.add_edge("codegen_tools", "codegen")
     # workflow.add_edge("codegen", "git_push")
-    workflow.add_edge("git_push", "human_continue")
+    workflow.add_conditional_edges(
+        "git_push",
+        route_after_git_push,
+        {"codegen": "codegen", "human_continue": "human_continue"},
+    )
+    # workflow.add_edge("git_push", "human_continue")
     workflow.add_conditional_edges(
         "human_continue",
         route_after_continue,

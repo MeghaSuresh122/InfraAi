@@ -4,8 +4,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage
 from langgraph.types import Command, interrupt
@@ -172,6 +173,8 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
                 f"Artifact type: {artifact}\n"
                 f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
                 f"\n\nAvailable tools: {', '.join(tool_names)}\n"
+                f"FOLLOW THIS STRICTLY: Number of MCP tool calls you can make is: {max(0, 6 - state.get("tool_call_count", 0))}\n"
+                "If number of tool calls you can make is zero or less, generate final output."
             )
             messages = (
                 _codegen_system_messages(artifact) +
@@ -218,41 +221,33 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
         "tool_call_count": len(state.get("tool_calls", []))
     }
 
-
 def git_push_node(state: InfraGraphState) -> dict[str, Any]:
     logger.info("=== CODE GEN OUTPUT PROCESSING ===")
     text = str(state.get("messages", [])[-1].content) if state.get("messages") else ""
     files = _parse_generated_files(text)
+
     if len(files) == 0:
         logger.error("No files generated from code generation agent")
         error_payload = {
             "kind": "Code generation output error",
             "message": f"Code generation output error: No files generated from code generation agent",
             "error": f"Code generation output error: No files generated from code generation agent",
-            "generated_files": state.get("generated_files", []),
+            "generated_output": text,
             "tool_call_count": state.get("tool_call_count", 0),
             "tool_calls": state.get("tool_calls", []),
         }
         edited = interrupt(error_payload)
         if edited and edited.get("retry"):
             logger.info("Retrying code generation...")
-            return Command(
-                update={
-                    "messages": [
-                        RemoveMessage(id=m.id) for m in state.values.get("messages", [])
-                    ],
-                    "tool_calls": [],
-                    "tool_call_count": 0
-                },
-                goto="codegen"
-            )
+            return {
+                "generated_files": [],
+            }
         else:
             logger.error("User did not retry code generation")
             raise RuntimeError(f"Code generation failed: No files generated")
-            
-        
-    logger.info("Parsed %d files from codegen output", len(files))
     
+    logger.info("Parsed %d files from codegen output", len(files))
+
     tmp = Path(tempfile.mkdtemp(prefix="infra-ai-codegen-"))
     written_fmt: list[tuple[str, str]] = []
     try:
@@ -275,14 +270,11 @@ def git_push_node(state: InfraGraphState) -> dict[str, Any]:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-    state.update({
-        "generated_files": [{"path": r, "content": c} for r, c in written_fmt],
-        "events": [{"node": "codegen", "files": len(written_fmt)}],
-    })
+    state_generated_files = [{"path": r, "content": c} for r, c in written_fmt]
 
     logger.info("=== GIT PUSH STAGE ===")
     item = state.get("current_config_item") or {}
-    gfs = state.get("generated_files") or []
+    gfs = state_generated_files if state_generated_files is not None else []
     files = [(g["path"], g["content"]) for g in gfs]
     prefix = str(item.get("id") or "config").replace("/", "-")[:40]
     logger.info("Pushing %d files to git. Prefix: %s", len(files), prefix)
@@ -343,7 +335,16 @@ def git_push_node(state: InfraGraphState) -> dict[str, Any]:
         logger.info("PR created: %s", pr_url)
     
     return {
+        "generated_files": [{"path": r, "content": c} for r, c in written_fmt],
         "last_git_branch": branch,
         "last_pr_url": pr_url,
-        "events": [{"node": "git_push", "messages": messages, "branch": branch, "pr_url": pr_url}],
+        "events": [
+            {"node": "codegen", "files": len(written_fmt)},
+            {"node": "git_push", "messages": messages, "branch": branch, "pr_url": pr_url}
+        ],
     }
+
+def route_after_git_push(state: InfraGraphState) -> Literal["codegen", "human_continue"]:
+    if len(state.get("generated_files", [])) > 0:
+        return "human_continue"
+    return "codegen"
