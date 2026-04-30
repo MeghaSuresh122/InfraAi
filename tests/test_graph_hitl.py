@@ -1,7 +1,7 @@
 import pytest
 
 from infra_ai.schemas.config_plan import ConfigPlan, ConfigPlanItem
-import infra_ai.nodes.workflow_nodes as wf
+import infra_ai.nodes.analysis_nodes as wf
 from infra_ai.runner import invoke_until_interrupt, resume_run
 
 

@@ -1,6 +1,6 @@
 from langgraph.graph import END, START, StateGraph
 
-from infra_ai.nodes.workflow_nodes import infra_builder_node, infra_validator_node
+from infra_ai.nodes.infra_nodes import infra_builder_node, infra_validator_node
 from infra_ai.state import InfraGraphState
 
 

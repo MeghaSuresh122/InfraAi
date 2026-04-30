@@ -1,4 +1,4 @@
-from infra_ai.nodes.workflow_nodes import _codegen_system_messages
+from infra_ai.nodes.codegen_nodes import _codegen_system_messages
 
 
 def test_codegen_system_prompt_for_terraform() -> None:
