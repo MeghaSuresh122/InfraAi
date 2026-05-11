@@ -11,6 +11,7 @@ from langgraph.prebuilt import ToolNode #, tools_condition
 _sqlite_conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
 
 from infra_ai.graphs.infra_subgraph import build_infra_subgraph
+from infra_ai.graphs.repo_context_subgraph import build_repo_context_subgraph
 from infra_ai.logging_config import get_logger
 from infra_ai.nodes.analysis_nodes import (
     config_analysis_node,
@@ -54,6 +55,7 @@ def build_app_graph():
     workflow.add_node("human_review", human_review_node)
     workflow.add_node("human_repo", human_repo_node)
     workflow.add_node("clear_messages", clear_messages_node)
+    workflow.add_node("repo_context", build_repo_context_subgraph())
     workflow.add_node("codegen", codegen_node)
 
     # tools = ToolsLoader()._load_all_tools()
@@ -63,7 +65,7 @@ def build_app_graph():
     workflow.add_node("git_push", git_push_node)
     workflow.add_node("human_continue", human_continue_node)
     workflow.add_node("finalize", finalize_node)
-    logger.debug("Added %d nodes to graph", 10)
+    logger.debug("Added %d nodes to graph", 11)
 
     # Add edges
     workflow.add_edge(START, "requirement_analysis")
@@ -77,7 +79,8 @@ def build_app_graph():
     workflow.add_edge("infra", "human_review")
     workflow.add_edge("human_review", "human_repo")
     workflow.add_edge("human_repo", "clear_messages")
-    workflow.add_edge("clear_messages", "codegen")
+    workflow.add_edge("clear_messages", "repo_context")
+    workflow.add_edge("repo_context", "codegen")
     from infra_ai.nodes.tools import tools_condition
     workflow.add_conditional_edges(
         "codegen",

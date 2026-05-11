@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage, RemoveMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, RemoveMessage
 from langgraph.types import Command, interrupt
 
 from infra_ai.llm.factory import get_chat_model
@@ -44,6 +44,33 @@ def _parse_generated_files(text: str) -> list[tuple[str, str]]:
         if m:
             files.append(("generated/main.tf", m.group(1).strip()))
     return files
+
+
+def _repo_aware_system_messages(state: InfraGraphState) -> list[Any]:
+    """Compact system guidance from analyzed repo (tree, summary, modules)."""
+    rc = state.get("repo_context") or {}
+    paths = rc.get("repo_tree_paths") or []
+    if not paths:
+        return []
+    summary = rc.get("repo_summary") or {}
+    mods = rc.get("reusable_modules") or {}
+    head = (rc.get("repo_head_commit") or state.get("repo_head_commit") or "")[:16]
+    top = summary.get("top_level_folders") or []
+    if isinstance(top, list):
+        top_str = ", ".join(str(x) for x in top[:25])
+    else:
+        top_str = str(top)
+    mods_json = json.dumps(mods, ensure_ascii=False, default=str)[:4500]
+    body = (
+        "You are generating infrastructure changes for an EXISTING repository.\n"
+        "Follow the repository layout and paths shown below; prefer updating listed files "
+        "and reusing local Terraform/Kubernetes modules when applicable.\n\n"
+        f"- Snapshot HEAD (short): {head}\n"
+        f"- File count: {len(paths)}\n"
+        f"- Top-level folders: {top_str}\n"
+        f"- Reusable modules / patterns (JSON, truncated):\n{mods_json}\n"
+    )
+    return [SystemMessage(content=body)]
 
 
 def _codegen_system_messages(artifact: str) -> list[Any]:
@@ -155,9 +182,32 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             'terraform {\n  required_version = ">= 1.5.0"\n}\n```\n'
         )
 
+    rag_block = (state.get("repo_rag_context_text") or "").strip()
+    plan_hint = ""
+    cp = state.get("codegen_plan") or {}
+    if cp:
+        plan_hint = (
+            "\n\n## codegen_plan (must align new/updated paths with this plan)\n"
+            f"{json.dumps(cp, indent=2, default=str)[:6000]}\n"
+        )
+
+    base_user_prompt = (
+        "Generate infrastructure files. Use markdown sections starting with "
+        "'### <relative/path>' followed by a fenced code block.\n\n"
+        f"Artifact type: {artifact}\n"
+        f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
+        f"{plan_hint}"
+    )
+    if rag_block:
+        base_user_prompt += (
+            "\n\n## Repository context (follow existing layout; reuse modules where noted)\n"
+            f"{rag_block}\n"
+        )
+
     if mock_llm_enabled():
         logger.debug("Using mock codegen")
         text = _mock_codegen_text()
+        msg = AIMessage(content=text)
     else:
         try:
             logger.debug("Invoking LLM for code generation")
@@ -167,19 +217,18 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             llm_with_tools = llm.bind_tools(tools)
             tool_names = [tool.name for tool in tools]
 
+            tool_budget = max(0, 6 - int(state.get("tool_call_count") or 0))
             prompt = (
-                "Generate infrastructure files. Use markdown sections starting with "
-                "'### <relative/path>' followed by a fenced code block.\n\n"
-                f"Artifact type: {artifact}\n"
-                f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
-                f"\n\nAvailable tools: {', '.join(tool_names)}\n"
-                f"FOLLOW THIS STRICTLY: Number of MCP tool calls you can make is: {max(0, 6 - state.get("tool_call_count", 0))}\n"
+                base_user_prompt
+                + f"\n\nAvailable tools: {', '.join(tool_names)}\n"
+                f"FOLLOW THIS STRICTLY: Number of MCP tool calls you can make is: {tool_budget}\n"
                 "If number of tool calls you can make is zero or less, generate final output."
             )
             messages = (
-                _codegen_system_messages(artifact) +
-                [HumanMessage(content=prompt)] +
-                state["messages"]
+                _codegen_system_messages(artifact)
+                + _repo_aware_system_messages(state)
+                + [HumanMessage(content=prompt)]
+                + list(state.get("messages") or [])
             )
             msg = llm_with_tools.invoke(messages)
             logger.info("Code generation completed")

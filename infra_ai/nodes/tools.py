@@ -1,5 +1,6 @@
-import json
 import asyncio
+import json
+import os
 
 from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -136,19 +137,21 @@ class ToolsLoader:
         return self.tools
 
     def _load_mcp_tools(self):
-       mcp_tools = self.load_mcp_servers_sync()
-       return [self._create_wrapped_tool(tool) for tool in mcp_tools]
+        if os.environ.get("INFRA_AI_SKIP_MCP", "").lower() in ("1", "true", "yes"):
+            return []
+        mcp_tools = self.load_mcp_servers_sync()
+        return [self._create_wrapped_tool(tool) for tool in mcp_tools]
 
     def _create_wrapped_tool(self, tool):
-       """Create a tool that works in both sync and async contexts."""
-       return StructuredTool(
-           name=tool.name,
-           description=tool.description,
-           args_schema=tool.args_schema,
-           func=self._make_sync_wrapper(tool), # For sync calls
-           coroutine=self._make_async_wrapper(tool) # For async calls
-       )
-    
+        """Create a tool that works in both sync and async contexts."""
+        return StructuredTool(
+            name=tool.name,
+            description=tool.description,
+            args_schema=tool.args_schema,
+            func=self._make_sync_wrapper(tool),  # For sync calls
+            coroutine=self._make_async_wrapper(tool),  # For async calls
+        )
+
     def _make_sync_wrapper(self, tool):
         def sync_wrapper(**kwargs):
             # tool_logger.log(tool.name, kwargs)
@@ -184,3 +187,4 @@ class ToolsLoader:
 
 # Initialize global tools loader and load tools
 global_tools_loader = ToolsLoader()
+

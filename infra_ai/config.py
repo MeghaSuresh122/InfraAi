@@ -50,7 +50,19 @@ class Settings(BaseSettings):
     github_app_installation_id: str = Field(default="", alias="GITHUB_APP_INSTALLATION_ID")
 
     milvus_uri: str = Field(default="", alias="MILVUS_URI")
+    milvus_database: str = Field(default="", alias="MILVUS_DATABASE")
+    """Milvus database name; empty uses client default (often ``default``)."""
+    milvus_collection_repo_context: str = Field(
+        default="infra_ai_repo_context",
+        alias="MILVUS_COLLECTION_REPO_CONTEXT",
+    )
     skill_retrieval_mode: str = Field(default="filesystem", alias="SKILL_RETRIEVAL_MODE")
+    repo_context_vector_store: str = Field(default="auto", alias="REPO_CONTEXT_VECTOR_STORE")
+    """auto: use Milvus when MILVUS_URI set; milvus|none force mode."""
+    repo_context_embedding_model: str = Field(
+        default="sentence-transformers/all-MiniLM-L6-v2",
+        alias="REPO_CONTEXT_EMBEDDING_MODEL",
+    )
 
     skills_dir: str = Field(default_factory=_default_skills_dir, alias="SKILLS_DIR")
 
