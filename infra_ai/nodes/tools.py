@@ -1,11 +1,14 @@
 import asyncio
 import json
 import os
+import logging
 
 from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_mcp_adapters.sessions import StdioConnection, SSEConnection, StreamableHttpConnection
 # from infra_ai.nodes.tools_logger import tool_logger
+
+logger = logging.getLogger(__name__)
 
 # Override langgraph.prebuilt.tools_condition
 from langchain_core.messages import (
@@ -123,8 +126,11 @@ class ToolsLoader:
             elif server_type.lower() in ("streamablehttp", "streamable_http", "http"):
                 connection = StreamableHttpConnection(transport="streamable_http", url=server_config.get("url"))
             if connection:
-                tools = await load_mcp_tools(session=None, connection=connection)
-                all_tools.extend(tools)
+                try:
+                    tools = await load_mcp_tools(session=None, connection=connection)
+                    all_tools.extend(tools)
+                except Exception as e:
+                    logger.error(f"Error loading MCP tools from {name}: {e}")
         return all_tools
 
     def load_mcp_servers_sync(self):

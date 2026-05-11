@@ -18,6 +18,8 @@ class InfraGraphState(TypedDict, total=False):
     current_config_item: dict[str, Any]
     config_fields_output: dict[str, Any]
     repo_url: str
+    repo_folder: str
+    """Subfolder path within the repo. Empty string means the LLM should create a new folder"""
     target_branch: str
     git_remote_name: str
     human_review_status: str

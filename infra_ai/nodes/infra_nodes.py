@@ -246,16 +246,23 @@ def human_repo_node(state: InfraGraphState) -> dict[str, Any]:
     s = get_settings()
     repo = state.get("repo_url") or s.git_repo_url
     target_branch = state.get("target_branch") or s.git_default_branch
-    logger.info("Current repo: %s, Target branch: %s", repo, target_branch)
+    repo_folder = state.get("repo_folder") or ""
+    logger.info("Current repo: %s, Target branch: %s, Folder: %s", repo, target_branch, repo_folder or "<none>")
     logger.info("Pausing for repo confirmation")
-    
+
     payload = {
         "kind": "confirm_repo",
         "repo_url": repo,
+        "repo_folder": repo_folder,
         "target_branch": target_branch,
         "message": (
-            "Confirm code generation. Override repo_url: use an https/git URL to clone and push a new branch, "
-            "or a filesystem path (e.g. ./my-infra-out or C:/infra-out) to write files locally only (no GitHub push)."
+            "Confirm code generation settings.\n"
+            "- repo_url: HTTPS/git URL to clone and push, or a filesystem path for local-only output.\n"
+            "- repo_folder: Subfolder path within the repo where config files will be created/updated "
+            "(e.g. 'environments/prod/eks'). "
+            "Leave empty ('') to let the agent create a new folder following the repo's existing structure.\n"
+            "- target_branch: Branch to push changes to.\n"
+            "- confirm: Set to false to abort."
         ),
     }
     conf = interrupt(payload)
@@ -264,12 +271,19 @@ def human_repo_node(state: InfraGraphState) -> dict[str, Any]:
     if "repo_url" in conf:
         repo = conf["repo_url"]
         logger.info("User provided override repo_url: %s", repo)
+
+    # repo_folder: empty string means "create new folder"
+    repo_folder = conf.get("repo_folder", repo_folder)
+    logger.info("repo_folder confirmed: %s", repo_folder or "<create new>")
+
     branch = conf.get("target_branch") or state.get("target_branch") or s.git_default_branch
     confirm = conf.get("confirm", True)
     logger.info("Repo confirmation received. Confirmed: %s", confirm)
     return {
         "repo_url": repo,
+        "repo_folder": repo_folder,
         "target_branch": branch,
         "last_interrupt_kind": "confirm_repo",
         "events": [{"node": "human_repo", "confirm": confirm}],
     }
+

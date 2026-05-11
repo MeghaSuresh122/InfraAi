@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
+from distro import name
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, RemoveMessage
 from langgraph.types import Command, interrupt
 
@@ -47,7 +48,7 @@ def _parse_generated_files(text: str) -> list[tuple[str, str]]:
 
 
 def _repo_aware_system_messages(state: InfraGraphState) -> list[Any]:
-    """Compact system guidance from analyzed repo (tree, summary, modules)."""
+    """Compact system guidance from analyzed repo (tree, summary, modules, folder context)."""
     rc = state.get("repo_context") or {}
     paths = rc.get("repo_tree_paths") or []
     if not paths:
@@ -61,6 +62,34 @@ def _repo_aware_system_messages(state: InfraGraphState) -> list[Any]:
     else:
         top_str = str(top)
     mods_json = json.dumps(mods, ensure_ascii=False, default=str)[:4500]
+
+    # repo_folder guidance
+    repo_folder = (state.get("repo_folder") or "").strip()
+    folder_exists: bool = rc.get("repo_folder_exists", False)
+    folder_files: list[str] = rc.get("repo_folder_files") or []
+
+    if repo_folder:
+        if folder_exists:
+            folder_file_list = "\n".join(f"  - {f}" for f in folder_files) or "  (empty folder)"
+            folder_section = (
+                f"\n## Target folder: '{repo_folder}' (EXISTS)\n"
+                "Update or extend the files already present. "
+                "Generate every file path starting with the full folder path.\n"
+                f"Current files:\n{folder_file_list}\n"
+            )
+        else:
+            folder_section = (
+                f"\n## Target folder: '{repo_folder}' (DOES NOT EXIST — CREATE IT)\n"
+                "Create this new folder. Base its internal structure on sibling folders "
+                "visible in the repository layout above. "
+                "Generate every file path starting with the full folder path.\n"
+            )
+    else:
+        folder_section = (
+            "\n## Target folder: not specified\n"
+            "Choose a location that fits the existing repository layout.\n"
+        )
+
     body = (
         "You are generating infrastructure changes for an EXISTING repository.\n"
         "Follow the repository layout and paths shown below; prefer updating listed files "
@@ -69,6 +98,7 @@ def _repo_aware_system_messages(state: InfraGraphState) -> list[Any]:
         f"- File count: {len(paths)}\n"
         f"- Top-level folders: {top_str}\n"
         f"- Reusable modules / patterns (JSON, truncated):\n{mods_json}\n"
+        f"{folder_section}"
     )
     return [SystemMessage(content=body)]
 
@@ -196,8 +226,26 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
         "'### <relative/path>' followed by a fenced code block.\n\n"
         f"Artifact type: {artifact}\n"
         f"Fields JSON:\n{json.dumps(fields, indent=2)}\n"
-        f"{plan_hint}"
     )
+
+    # repo_folder instruction in user prompt
+    repo_folder = (state.get("repo_folder") or "").strip()
+    rc = state.get("repo_context") or {}
+    folder_exists: bool = rc.get("repo_folder_exists", False)
+    if repo_folder:
+        if folder_exists:
+            base_user_prompt += (
+                f"\nIMPORTANT: The target folder '{repo_folder}' already exists. "
+                "All generated file paths MUST start with this folder path. "
+                "Create new files or update existing ones within this folder.\n"
+            )
+        else:
+            base_user_prompt += (
+                f"\nIMPORTANT: The target folder '{repo_folder}' does NOT exist yet — create it. "
+                "All generated file paths MUST start with this folder path. "
+                "Model the folder structure on sibling folders in the repository.\n"
+            )
+    base_user_prompt += f"{plan_hint}"
     if rag_block:
         base_user_prompt += (
             "\n\n## Repository context (follow existing layout; reuse modules where noted)\n"
@@ -216,12 +264,28 @@ def codegen_node(state: InfraGraphState) -> dict[str, Any]:
             tools = global_tools_loader.tools
             llm_with_tools = llm.bind_tools(tools)
             tool_names = [tool.name for tool in tools]
+            if len(tool_names) > 0:
+                mcp_tool_usage_prompt = (
+                    "When using the `search_modules` tool:\n"
+                    "- The `module_query` MUST be a simple keyword (e.g., \"eks\", \"vpc\", \"security-group\").\n"
+                    "- DO NOT pass full module identifiers like \"namespace/name/provider\".\n"
+                    "- If you need to use a full module identifier (e.g., \"terraform-aws-modules/eks/aws\"):\n"
+                    "  → Extract only the module name (e.g., \"eks\") and use that as the query.\n"
+                    "\n"
+                    "After calling `search_modules`, select the best match where:"
+                    "- namespace matches (if known)\n"
+                    "- name matches\n"
+                    "- provider matches\n\n"
+                )
+            else:
+                mcp_tool_usage_prompt = ""
 
             tool_budget = max(0, 6 - int(state.get("tool_call_count") or 0))
             prompt = (
                 base_user_prompt
                 + f"\n\nAvailable tools: {', '.join(tool_names)}\n"
-                f"FOLLOW THIS STRICTLY: Number of MCP tool calls you can make is: {tool_budget}\n"
+                + mcp_tool_usage_prompt
+                + f"FOLLOW THIS STRICTLY: Number of MCP tool calls you can make is: {tool_budget}\n"
                 "If number of tool calls you can make is zero or less, generate final output."
             )
             messages = (

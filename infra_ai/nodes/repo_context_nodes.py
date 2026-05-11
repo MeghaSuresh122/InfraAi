@@ -52,6 +52,54 @@ def _read_snippet(repo_root: Path, rel: str, limit: int = 3500) -> str:
         return ""
 
 
+def _collect_readmes(repo_root: Path, repo_folder: str, limit_per_file: int = 3000) -> dict[str, str]:
+    """Return {relative_path: content} for README files found in:
+    - repo root
+    - repo_folder itself (if given)
+    - every parent directory of repo_folder up to the repo root
+    """
+    readmes: dict[str, str] = {}
+
+    def _try_dir(directory: Path) -> None:
+        for entry in sorted(directory.iterdir()):
+            if entry.is_file() and entry.name.upper().startswith("README"):
+                rel = entry.relative_to(repo_root).as_posix()
+                try:
+                    readmes[rel] = entry.read_text(encoding="utf-8", errors="replace")[:limit_per_file]
+                except OSError:
+                    pass
+
+    # Always check repo root
+    if repo_root.is_dir():
+        _try_dir(repo_root)
+
+    if repo_folder:
+        target = repo_root / repo_folder
+        # Walk parents between root and target (exclusive of root, inclusive of target)
+        parts = Path(repo_folder).parts
+        for i in range(1, len(parts) + 1):
+            candidate = repo_root / Path(*parts[:i])
+            if candidate.is_dir() and candidate != repo_root:
+                _try_dir(candidate)
+
+    return readmes
+
+
+def _folder_info(repo_root: Path, repo_folder: str) -> tuple[bool, list[str]]:
+    """Return (exists, list_of_relative_file_paths_inside_folder)."""
+    if not repo_folder:
+        return False, []
+    target = repo_root / repo_folder
+    if not target.is_dir():
+        return False, []
+    files = [
+        f.relative_to(repo_root).as_posix()
+        for f in sorted(target.rglob("*"))
+        if f.is_file() and "/.git/" not in f.as_posix().replace("\\", "/")
+    ]
+    return True, files
+
+
 def repo_context_head_node(state: InfraGraphState) -> dict[str, Any]:
     repo_url = (state.get("repo_url") or "").strip()
     branch = state.get("target_branch") or "main"
@@ -171,18 +219,39 @@ def repo_context_analyze_node(state: InfraGraphState) -> dict[str, Any]:
         for rel in tf_yaml:
             excerpts[rel] = _read_snippet(root, rel)
 
+        # repo_folder awareness
+        repo_folder = (state.get("repo_folder") or "").strip()
+        readme_contents = _collect_readmes(root, repo_folder)
+        folder_exists, folder_files = _folder_info(root, repo_folder)
+        logger.info(
+            "repo_folder='%s' exists=%s files=%d READMEs=%d",
+            repo_folder or "<none>", folder_exists, len(folder_files), len(readme_contents),
+        )
+
         snap = {
             "repo_head_commit": head,
             "repo_tree_paths": paths,
             "repo_summary": summary,
             "reusable_modules": modules,
             "file_excerpts": excerpts,
+            # folder-aware fields
+            "readme_contents": readme_contents,
+            "repo_folder_exists": folder_exists,
+            "repo_folder_files": folder_files,
         }
         return {
             "repo_context": snap,
             "repo_context_source": source,
             "repo_context_events": events
-            + [{"node": "repo_context_analyze", "paths": len(paths), "source": source}],
+            + [{
+                "node": "repo_context_analyze",
+                "paths": len(paths),
+                "source": source,
+                "repo_folder": repo_folder or "<none>",
+                "folder_exists": folder_exists,
+                "folder_files": len(folder_files),
+                "readmes": list(readme_contents.keys()),
+            }],
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("repo_context_analyze failed")
@@ -243,6 +312,49 @@ def repo_context_plan_rag_node(state: InfraGraphState) -> dict[str, Any]:
     if key and head:
         ranked = merge_milvus_ranks(key, branch, head, artifact, fields, ranked, top_k=18)
 
+    repo_folder = (state.get("repo_folder") or "").strip()
+    folder_exists: bool = rc.get("repo_folder_exists", False)
+    folder_files: list[str] = rc.get("repo_folder_files") or []
+    readme_contents: dict[str, str] = rc.get("readme_contents") or {}
+
+    # --- README instructions section ---
+    readme_parts: list[str] = []
+    for readme_path, readme_text in readme_contents.items():
+        readme_parts.append(f"#### {readme_path}\n{readme_text.strip()}")
+    readme_section = "\n\n".join(readme_parts)
+
+    # --- repo_folder context section ---
+    if repo_folder:
+        if folder_exists:
+            folder_ctx_lines = [
+                f"The target folder '{repo_folder}' EXISTS in the repository.",
+                "Treat the files listed below as the current baseline — update or extend them as needed.",
+                "Generate the FULL path for every file (starting with the folder path).",
+                f"Current files inside '{repo_folder}':",
+            ] + ([f"  - {f}" for f in folder_files] or ["  (no files yet)"])
+        else:
+            # Identify sibling folders to infer structural conventions
+            parent_path = str(Path(repo_folder).parent).replace("\\", "/")
+            sibling_dirs = sorted({
+                str(Path(p).parent).replace("\\", "/")
+                for p in paths
+                if str(Path(p).parent).replace("\\", "/").startswith(parent_path)
+                   and str(Path(p).parent).replace("\\", "/") != parent_path
+                   and str(Path(p).parent).replace("\\", "/") != repo_folder
+            })[:10]
+            folder_ctx_lines = [
+                f"The target folder '{repo_folder}' does NOT exist in the repository — create it.",
+                "Model the new folder's structure on the sibling/peer folders shown below.",
+                "Generate the FULL path for every file (starting with the folder path).",
+                f"Sibling folders under '{parent_path}' (for structural reference):",
+            ] + ([f"  - {d}" for d in sibling_dirs] or ["  (no peer folders found)"])
+        folder_context_section = "\n".join(folder_ctx_lines)
+    else:
+        folder_context_section = (
+            "No specific repo_folder was provided. "
+            "Choose an appropriate path that fits the existing repository layout."
+        )
+
     rag_sections: list[tuple[str, str]] = [
         ("codegen_plan", json.dumps(plan, indent=2, default=str)[:8000]),
         ("repo_summary", json.dumps(summary, indent=2, default=str)[:6000]),
@@ -252,6 +364,10 @@ def repo_context_plan_rag_node(state: InfraGraphState) -> dict[str, Any]:
             json.dumps(ranked[:25], indent=2, default=str)[:6000],
         ),
     ]
+    if readme_section:
+        rag_sections.append(("readme_instructions", readme_section[:8000]))
+    rag_sections.append(("repo_folder_context", folder_context_section[:3000]))
+
     snippet_parts: list[str] = []
     for row in ranked[:12]:
         p = row.get("path")
